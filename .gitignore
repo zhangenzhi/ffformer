@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data files
+data/ForAINetV2/train_val_data/*.ply
+data/ForAINetV2/test_data/*.ply
+data/ForAINetV2/forainetv2_instance_data/
+*.npy
+*.pkl
+*.laz
+*.las
+
+# Model checkpoints and outputs
+work_dirs/
+*.pth
+*.ckpt
+
+# Logs
+*.log
+tensorboard_logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
