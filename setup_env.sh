@@ -16,14 +16,17 @@ echo "=== Step 2: Install PyTorch 2.1.0 + CUDA 12.1 ==="
 # PyTorch 2.1 supports H100 natively; cu121 is the closest stable build to CUDA 12.8
 pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
 
-echo "=== Step 3: Install OpenMMLab stack ==="
+echo "=== Step 3: Pin numpy and setuptools before OpenMMLab ==="
+pip install "numpy<2" setuptools
+
+echo "=== Step 4: Install OpenMMLab stack ==="
 pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.1/index.html
 pip install mmengine==0.7.3
 pip install mmdet==3.0.0
 pip install mmsegmentation==1.0.0
 pip install --no-build-isolation git+https://github.com/open-mmlab/mmdetection3d.git@22aaa47fdb53ce1870ff92cb7e3f96ae38d17f61
 
-echo "=== Step 4: Install MinkowskiEngine ==="
+echo "=== Step 5: Install MinkowskiEngine ==="
 conda install openblas-devel -c anaconda -y 2>/dev/null || true
 # H100 = sm_90
 export TORCH_CUDA_ARCH_LIST="9.0"
@@ -32,19 +35,19 @@ pip install git+https://github.com/NVIDIA/MinkowskiEngine.git@02fc608bea4c0549b0
     --global-option="--blas=openblas" \
     --global-option="--force_cuda"
 
-echo "=== Step 5: Install torch-scatter ==="
+echo "=== Step 6: Install torch-scatter ==="
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
 
-echo "=== Step 6: Install torch-cluster ==="
+echo "=== Step 7: Install torch-cluster ==="
 pip install torch-cluster -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
 
-echo "=== Step 7: Install torch-points-kernels ==="
+echo "=== Step 8: Install torch-points-kernels ==="
 pip install torch-points-kernels==0.7.0
 
-echo "=== Step 8: Install spconv ==="
+echo "=== Step 9: Install spconv ==="
 pip install spconv-cu120==2.3.6
 
-echo "=== Step 9: Install segmentator ==="
+echo "=== Step 10: Install segmentator ==="
 cd /tmp
 rm -rf segmentator
 git clone https://github.com/Karbo123/segmentator.git
@@ -60,7 +63,7 @@ make -j$(nproc)
 make install
 cd /tmp && rm -rf segmentator
 
-echo "=== Step 10: Install remaining dependencies ==="
+echo "=== Step 11: Install remaining dependencies ==="
 pip install \
     open3d==0.17.0 \
     plyfile==1.0.2 \
@@ -82,7 +85,7 @@ pip install \
     opencv-python==4.7.0.72 \
     numba==0.57.0
 
-echo "=== Step 11: Replace mmengine/mmdet3d files ==="
+echo "=== Step 12: Replace mmengine/mmdet3d files ==="
 MMENGINE_PATH=$(python -c "import mmengine; import os; print(os.path.dirname(mmengine.__file__))")
 MMDET3D_PATH=$(python -c "import mmdet3d; import os; print(os.path.dirname(mmdet3d.__file__))")
 WORKSPACE=$(cd "$(dirname "$0")" && pwd)
