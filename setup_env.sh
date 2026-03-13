@@ -21,7 +21,7 @@ pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2
 pip install mmengine==0.7.3
 pip install mmdet==3.0.0
 pip install mmsegmentation==1.0.0
-pip install git+https://github.com/open-mmlab/mmdetection3d.git@22aaa47fdb53ce1870ff92cb7e3f96ae38d17f61
+pip install --no-build-isolation git+https://github.com/open-mmlab/mmdetection3d.git@22aaa47fdb53ce1870ff92cb7e3f96ae38d17f61
 
 echo "=== Step 4: Install MinkowskiEngine ==="
 conda install openblas-devel -c anaconda -y 2>/dev/null || true
