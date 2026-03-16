@@ -41,6 +41,16 @@ work_dirs/
 *.log
 tensorboard_logs/
 
+# Visualization outputs
+*.html
+
+# Singularity / container images
+*.sif
+*.simg
+
+# Zip / archive files
+*.zip
+
 # OS files
 .DS_Store
 Thumbs.db
