@@ -31,9 +31,9 @@ conda install openblas-devel -c anaconda -y 2>/dev/null || true
 # H100 = sm_90
 export TORCH_CUDA_ARCH_LIST="9.0"
 export MAX_JOBS=4
-pip install git+https://github.com/NVIDIA/MinkowskiEngine.git@02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 -v --no-deps \
-    --global-option="--blas=openblas" \
-    --global-option="--force_cuda"
+export BLAS="openblas"
+export FORCE_CUDA=1
+pip install git+https://github.com/NVIDIA/MinkowskiEngine.git@02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 -v --no-deps
 
 echo "=== Step 6: Install torch-scatter ==="
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
