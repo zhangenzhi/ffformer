@@ -2335,8 +2335,12 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 wood_class = 1
                 semantic_predictions_bi = torch.argmax(bi_semantic_logits, dim=1)
                 tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
-                t5 = time.time()                 
-                #########print(f"u net heads: {(t5 - t4_4)*1000:.0f} ms")  
+                t5 = time.time()
+                #########print(f"u net heads: {(t5 - t4_4)*1000:.0f} ms")
+                ######### DEBUG (uncomment to diagnose)
+                # bi_probs = torch.softmax(bi_semantic_logits, dim=1)
+                # print(f"[DEBUG] Region {region_idx}: tree_voxels={tree_indices.numel()}/{semantic_predictions_bi.numel()}")
+                #########  
                 with torch.no_grad():
                     nn_idx_pc1 = []                
                     chunk = self.chunk
@@ -2412,7 +2416,6 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                         torch.tensor(valid_scores_mask, device=pc3.device) &
                         torch.tensor(valid_scores_mask2, device=pc3.device)
                     )[0]                                            # (K,)
-
                     if keep.numel():
                         # mask/score（GPU）
                         masks_kept  = torch.as_tensor(masks,  device=pc3.device)[keep]   # (K,N3)

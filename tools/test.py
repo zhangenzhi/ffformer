@@ -134,19 +134,11 @@ def main():
 
     checkpoint_to_fix = checkpoint[key_to_fix]
 
-    for layer in list(checkpoint_to_fix.keys()):
-        if (layer.startswith('unet') or layer.startswith('input_conv')) \
-            and layer.endswith('weight') \
-            and len(checkpoint_to_fix[layer].shape) == 5:
-            w = checkpoint_to_fix[layer]
-            # spconv 2.x expects [O, D, H, W, I].
-            # Checkpoint may be in [D, H, W, I, O] (old spconv) format.
-            # Detect by checking if spatial dims (0:3) are small and
-            # channel dims (3:5) are larger or equal.
-            if w.shape[0] <= w.shape[3] and w.shape[0] <= w.shape[4]:
-                # [D, H, W, I, O] -> [O, D, H, W, I]
-                checkpoint_to_fix[layer] = w.permute(4, 0, 1, 2, 3)
-            # else: already in [O, D, H, W, I], skip
+    # NOTE: The checkpoint weights are already in the correct format for
+    # spconv 2.x. The previous permutation [D,H,W,I,O] -> [O,D,H,W,I]
+    # was WRONG and caused all instance scores to be near-zero, effectively
+    # disabling instance segmentation. Verified 2026-03-16.
+    print('  [INFO] Skipping spconv weight permutation (weights already correct)')
 
     import tempfile
     with tempfile.NamedTemporaryFile(
