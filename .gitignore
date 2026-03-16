@@ -24,6 +24,9 @@ env/
 *.swo
 
 # Data files
+data/ForAINetV2/points/
+data/ForAINetV2/instance_mask/
+data/ForAINetV2/semantic_mask/
 data/ForAINetV2/train_val_data/*.ply
 data/ForAINetV2/test_data/*.ply
 data/ForAINetV2/forainetv2_instance_data/
