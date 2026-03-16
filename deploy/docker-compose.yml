@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  forestformer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: forestformer3d:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../work_dirs/clean_forestformer:/weights:ro
+      - ./results:/tmp/ffformer_results
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CHECKPOINT_PATH=/weights/epoch_3000_fix.pth
+      - CONFIG_PATH=/app/configs/jpeaks_test.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
