@@ -3,6 +3,9 @@ import argparse
 import logging
 import os
 import os.path as osp
+import sys
+sys.path.insert(0, osp.dirname(osp.dirname(osp.abspath(__file__))))
+import mmcv_compat  # noqa: E402, F401 - patch mmcv version
 
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log

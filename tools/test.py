@@ -2,6 +2,9 @@
 import argparse
 import os
 import os.path as osp
+import sys
+sys.path.insert(0, osp.dirname(osp.dirname(osp.abspath(__file__))))
+import mmcv_compat  # noqa: E402, F401 - patch mmcv version
 
 import torch
 from mmengine.config import Config, ConfigDict, DictAction
@@ -135,8 +138,15 @@ def main():
         if (layer.startswith('unet') or layer.startswith('input_conv')) \
             and layer.endswith('weight') \
             and len(checkpoint_to_fix[layer].shape) == 5:
-            checkpoint_to_fix[layer] = \
-                checkpoint_to_fix[layer].permute(1, 2, 3, 4, 0)
+            w = checkpoint_to_fix[layer]
+            # spconv 2.x expects [O, D, H, W, I].
+            # Checkpoint may be in [D, H, W, I, O] (old spconv) format.
+            # Detect by checking if spatial dims (0:3) are small and
+            # channel dims (3:5) are larger or equal.
+            if w.shape[0] <= w.shape[3] and w.shape[0] <= w.shape[4]:
+                # [D, H, W, I, O] -> [O, D, H, W, I]
+                checkpoint_to_fix[layer] = w.permute(4, 0, 1, 2, 3)
+            # else: already in [O, D, H, W, I], skip
 
     import tempfile
     with tempfile.NamedTemporaryFile(
