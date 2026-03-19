@@ -1,0 +1,45 @@
+name: Build & Push Docker Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/Dockerfile'
+      - '.github/workflows/docker-publish.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: |
+            zhangenzhi/forestformer3d:latest
+            zhangenzhi/forestformer3d:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
