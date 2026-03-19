@@ -15,6 +15,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - CHECKPOINT_PATH=/weights/epoch_3000_fix.pth
       - CONFIG_PATH=/app/configs/jpeaks_test.py
+      - PYTHONPATH=/app
     deploy:
       resources:
         reservations:
