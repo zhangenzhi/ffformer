@@ -34,7 +34,7 @@ INSTANCE_PALETTE = [
 UNASSIGNED_COLOR = (80, 80, 80)
 
 
-def parse_ply_ascii(filepath, max_points=200000):
+def parse_ply_ascii(filepath, max_points=0):
     fields, num_vertices = [], 0
     with open(filepath, 'r') as f:
         for line in f:
@@ -45,7 +45,7 @@ def parse_ply_ascii(filepath, max_points=200000):
                 fields.append(line.split()[-1])
             elif line == 'end_header':
                 break
-        indices = None if num_vertices <= max_points else set(
+        indices = None if (max_points <= 0 or num_vertices <= max_points) else set(
             random.sample(range(num_vertices), max_points))
         rows = []
         for i, line in enumerate(f):
@@ -473,7 +473,8 @@ def main():
         description='Visualize ForestFormer3D PLY predictions (Three.js)')
     parser.add_argument('input', help='PLY file or directory')
     parser.add_argument('--batch', action='store_true')
-    parser.add_argument('--max-points', type=int, default=200000)
+    parser.add_argument('--max-points', type=int, default=0,
+                        help='Max points to render (0 = all)')
     parser.add_argument('--mode', default='instance',
                         choices=['instance', 'semantic', 'compare',
                                  'instance_pred', 'instance_gt',

@@ -80,7 +80,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Render tree point clouds with normal-based shading')
     parser.add_argument('input', help='PLY prediction file')
-    parser.add_argument('--max-points', type=int, default=250000)
+    parser.add_argument('--max-points', type=int, default=0,
+                        help='Max points to render (0 = all)')
     parser.add_argument('--output-dir')
     args = parser.parse_args()
 
@@ -92,7 +93,7 @@ def main():
     print(f'  {n_total:,} points')
 
     # Subsample if needed
-    if n_total > args.max_points:
+    if args.max_points > 0 and n_total > args.max_points:
         idx = np.random.choice(n_total, args.max_points, replace=False)
         xyz = xyz[idx]; sem = sem[idx]; inst = inst[idx]
         print(f'  Subsampled to {args.max_points:,}')

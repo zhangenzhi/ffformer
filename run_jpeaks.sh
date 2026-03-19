@@ -51,10 +51,10 @@ if [ -z "$PLY_FILE" ]; then
 fi
 
 # Point cloud visualization (dual panel: instance)
-python tools/visualize_ply.py "$PLY_FILE" --mode instance --max-points 250000
+python tools/visualize_ply.py "$PLY_FILE" --mode instance
 
 # Shaded render
-python tools/mesh_reconstruct.py "$PLY_FILE" --max-points 250000
+python tools/mesh_reconstruct.py "$PLY_FILE"
 
 echo ""
 echo "============================================"
