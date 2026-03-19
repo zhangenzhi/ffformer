@@ -4,40 +4,50 @@
 Three.js GPU-accelerated rendering with dual-panel GT vs Prediction
 comparison and synchronized camera controls.
 
+Fast numpy-based PLY parsing with voxel-based smart downsampling
+for large point clouds (100M+).
+
 Usage:
     python tools/visualize_ply.py scene.ply
     python tools/visualize_ply.py scene.ply --mode semantic
-    python tools/visualize_ply.py dir/ --batch --max-points 300000
+    python tools/visualize_ply.py scene.ply --max-points 5000000
+    python tools/visualize_ply.py dir/ --batch
 """
 import argparse
 import base64
 import os
-import random
-import struct
 import sys
+import time
 
-SEMANTIC_COLORS = {
-    0: (139, 119, 101),  # ground
-    1: (210, 150, 60),   # wood
-    2: (34, 180, 34),    # leaf
-}
+import numpy as np
+
+SEMANTIC_COLORS = np.array([
+    [139, 119, 101],  # 0: ground
+    [210, 150, 60],   # 1: wood
+    [34, 180, 34],    # 2: leaf
+], dtype=np.uint8)
 SEMANTIC_NAMES = {0: 'ground', 1: 'wood', 2: 'leaf'}
 
-INSTANCE_PALETTE = [
+INSTANCE_PALETTE = np.array([
     (228,26,28),(55,126,184),(77,175,74),(152,78,163),(255,127,0),
     (255,255,51),(166,86,40),(247,129,191),(153,153,153),(102,194,165),
     (252,141,98),(141,160,203),(231,41,138),(34,139,34),(210,180,140),
     (0,191,255),(221,160,221),(127,255,0),(255,215,0),(70,130,180),
     (240,128,128),(176,224,230),(205,133,63),(188,189,34),(148,0,211),
     (0,206,209),
-]
-UNASSIGNED_COLOR = (80, 80, 80)
+], dtype=np.uint8)
+UNASSIGNED_COLOR = np.array([80, 80, 80], dtype=np.uint8)
 
 
-def parse_ply_ascii(filepath, max_points=0):
-    fields, num_vertices = [], 0
+def parse_ply_numpy(filepath):
+    """Fast numpy-based ASCII PLY parser. Returns dict of arrays."""
+    fields = []
+    num_vertices = 0
+    header_lines = 0
+
     with open(filepath, 'r') as f:
         for line in f:
+            header_lines += 1
             line = line.strip()
             if line.startswith('element vertex'):
                 num_vertices = int(line.split()[-1])
@@ -45,55 +55,99 @@ def parse_ply_ascii(filepath, max_points=0):
                 fields.append(line.split()[-1])
             elif line == 'end_header':
                 break
-        indices = None if (max_points <= 0 or num_vertices <= max_points) else set(
-            random.sample(range(num_vertices), max_points))
-        rows = []
-        for i, line in enumerate(f):
-            if i >= num_vertices:
-                break
-            if indices is not None and i not in indices:
-                continue
-            rows.append(line.strip().split())
-    return fields, rows, num_vertices
 
+    print(f'  {num_vertices:,} points, parsing with numpy ...', end=' ', flush=True)
+    t0 = time.time()
 
-def get_color(row, col, mode):
-    if mode == 'semantic_pred':
-        return SEMANTIC_COLORS.get(int(row[col['semantic_pred']]), UNASSIGNED_COLOR)
-    elif mode == 'semantic_gt':
-        return SEMANTIC_COLORS.get(int(row[col['semantic_gt']]), UNASSIGNED_COLOR)
-    elif mode == 'instance_pred':
-        v = int(row[col['instance_pred']])
-        return INSTANCE_PALETTE[v % len(INSTANCE_PALETTE)] if v >= 0 else UNASSIGNED_COLOR
-    elif mode == 'instance_gt':
-        v = int(row[col['instance_gt']])
-        return INSTANCE_PALETTE[v % len(INSTANCE_PALETTE)] if v >= 0 else UNASSIGNED_COLOR
-    return UNASSIGNED_COLOR
+    # numpy bulk read — skip header lines, read all vertex data at once
+    data = np.loadtxt(filepath, skiprows=header_lines, max_rows=num_vertices)
 
-
-def build_binary_data(fields, rows, left_mode, right_mode):
-    """Pack: pos(3xf32) + colorL(3xU8) + colorR(3xU8) + flagL(U8) + flagR(U8) = 20 bytes."""
+    print(f'{time.time() - t0:.1f}s', flush=True)
     col = {name: idx for idx, name in enumerate(fields)}
-    n = len(rows)
+    return data, col, fields, num_vertices
+
+
+def voxel_downsample(xyz, voxel_size, max_points):
+    """Voxel-based downsampling that preserves spatial structure."""
+    if max_points <= 0 or len(xyz) <= max_points:
+        return np.arange(len(xyz))
+
+    # Binary search for voxel size that gives ~max_points
+    lo, hi = voxel_size, voxel_size * 100
+    best_idx = None
+
+    for _ in range(15):
+        mid = (lo + hi) / 2
+        voxel_ids = np.floor(xyz / mid).astype(np.int64)
+        # Use structured array for unique
+        packed = np.ascontiguousarray(voxel_ids).view(
+            np.dtype((np.void, voxel_ids.dtype.itemsize * 3)))
+        _, idx = np.unique(packed, return_index=True)
+        if len(idx) > max_points:
+            lo = mid
+        else:
+            hi = mid
+            best_idx = idx
+
+    if best_idx is None or len(best_idx) > max_points:
+        # Fallback: random sample
+        best_idx = np.random.choice(len(xyz), max_points, replace=False)
+
+    return np.sort(best_idx)
+
+
+def get_colors_vectorized(data, col, mode):
+    """Vectorized color assignment — no Python loops."""
+    n = len(data)
+    colors = np.tile(UNASSIGNED_COLOR, (n, 1))  # default
+    flags = np.zeros(n, dtype=np.uint8)
+
+    if mode in ('semantic_pred', 'semantic_gt'):
+        key = mode
+        if key not in col:
+            return colors, flags
+        sem = data[:, col[key]].astype(np.int32)
+        valid = (sem >= 0) & (sem < len(SEMANTIC_COLORS))
+        colors[valid] = SEMANTIC_COLORS[sem[valid]]
+        flags[valid] = 255
+
+    elif mode in ('instance_pred', 'instance_gt'):
+        key = mode
+        if key not in col:
+            return colors, flags
+        inst = data[:, col[key]].astype(np.int32)
+        valid = inst >= 0
+        colors[valid] = INSTANCE_PALETTE[inst[valid] % len(INSTANCE_PALETTE)]
+        flags[valid] = 255
+
+    return colors, flags
+
+
+def build_binary_data_numpy(data, col, left_mode, right_mode):
+    """Pack binary data using numpy — vectorized, no per-point loops."""
+    n = len(data)
+    xyz = data[:, [col['x'], col['y'], col['z']]].astype(np.float32)
+
+    cl, fl = get_colors_vectorized(data, col, left_mode)
+    cr, fr = get_colors_vectorized(data, col, right_mode)
+
+    # Pack: pos(3xf32=12) + colorL(3xU8=3) + colorR(3xU8=3) + flagL(U8=1) + flagR(U8=1) = 20 bytes
     buf = bytearray(n * 20)
-    for i, row in enumerate(rows):
-        x = float(row[col['x']])
-        y = float(row[col['y']])
-        z = float(row[col['z']])
-        cl = get_color(row, col, left_mode)
-        cr = get_color(row, col, right_mode)
-        fl = 0 if cl == UNASSIGNED_COLOR else 255
-        fr = 0 if cr == UNASSIGNED_COLOR else 255
-        struct.pack_into('<fff8B', buf, i * 20,
-                         x, y, z,
-                         cl[0], cl[1], cl[2],
-                         cr[0], cr[1], cr[2],
-                         fl, fr)
-    return n, base64.b64encode(buf).decode('ascii')
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape(n, 20)
+
+    # Write floats
+    arr[:, 0:12] = xyz.view(np.uint8).reshape(n, 12)
+    # Write colors
+    arr[:, 12:15] = cl
+    arr[:, 15:18] = cr
+    arr[:, 18] = fl
+    arr[:, 19] = fr
+
+    return n, base64.b64encode(bytes(buf)).decode('ascii')
 
 
-def build_html(fields, rows, total_points, left_mode, right_mode, title):
-    n, b64data = build_binary_data(fields, rows, left_mode, right_mode)
+def build_html(data, col, total_points, left_mode, right_mode, title):
+    n, b64data = build_binary_data_numpy(data, col, left_mode, right_mode)
     left_label = left_mode.replace('_', ' ').title()
     right_label = right_mode.replace('_', ' ').title()
 
@@ -447,9 +501,18 @@ animate();
 
 def process_file(ply_path, output_dir, max_points, mode):
     basename = os.path.splitext(os.path.basename(ply_path))[0]
-    print(f'Processing: {basename} ...', end=' ', flush=True)
-    fields, rows, total = parse_ply_ascii(ply_path, max_points)
-    print(f'{len(rows):,}/{total:,} points loaded.', end=' ', flush=True)
+    print(f'Processing: {basename}')
+
+    data, col, fields, total = parse_ply_numpy(ply_path)
+
+    # Smart voxel downsample for HTML output
+    if max_points > 0 and total > max_points:
+        print(f'  Voxel downsampling {total:,} -> {max_points:,} ...', end=' ', flush=True)
+        t0 = time.time()
+        xyz = data[:, [col['x'], col['y'], col['z']]]
+        idx = voxel_downsample(xyz, voxel_size=0.1, max_points=max_points)
+        data = data[idx]
+        print(f'{len(data):,} points, {time.time() - t0:.1f}s')
 
     if mode == 'instance':
         left_mode, right_mode = 'instance_gt', 'instance_pred'
@@ -460,11 +523,13 @@ def process_file(ply_path, output_dir, max_points, mode):
     else:
         left_mode, right_mode = mode, mode
 
-    html = build_html(fields, rows, total, left_mode, right_mode, basename)
+    print(f'  Building HTML ({len(data):,} points) ...', end=' ', flush=True)
+    t0 = time.time()
+    html = build_html(data, col, total, left_mode, right_mode, basename)
     out_path = os.path.join(output_dir, f'{basename}_{mode}.html')
     with open(out_path, 'w') as f:
         f.write(html)
-    print(f'-> {out_path}')
+    print(f'{time.time() - t0:.1f}s -> {out_path}')
     return out_path
 
 
@@ -473,8 +538,8 @@ def main():
         description='Visualize ForestFormer3D PLY predictions (Three.js)')
     parser.add_argument('input', help='PLY file or directory')
     parser.add_argument('--batch', action='store_true')
-    parser.add_argument('--max-points', type=int, default=0,
-                        help='Max points to render (0 = all)')
+    parser.add_argument('--max-points', type=int, default=5_000_000,
+                        help='Max points for HTML viewer (default: 5M, 0 = all)')
     parser.add_argument('--mode', default='instance',
                         choices=['instance', 'semantic', 'compare',
                                  'instance_pred', 'instance_gt',

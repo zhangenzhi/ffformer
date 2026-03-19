@@ -43,18 +43,20 @@ python tools/test.py \
 # Note: evaluator will error (no GT) but PLY is saved before that
 
 echo ""
-echo "[Step 3/3] Generating visualization ..."
+echo "[Step 3/4] Generating quick preview (5M points) ..."
 PLY_FILE=$(ls ${OUTPUT_DIR}/${SCENE_NAME}_test.ply 2>/dev/null || echo "")
 if [ -z "$PLY_FILE" ]; then
     echo "  ERROR: No PLY output found. Check ${OUTPUT_DIR}/inference.log"
     exit 1
 fi
 
-# Point cloud visualization (dual panel: instance)
+# Quick preview HTML (downsampled for fast viewing)
 python tools/visualize_ply.py "$PLY_FILE" --mode instance
 
-# Shaded render
-python tools/mesh_reconstruct.py "$PLY_FILE"
+echo ""
+echo "[Step 4/4] Building full-resolution streaming viewer ..."
+# Octree tiles for full 100M+ point streaming
+python tools/potree_convert.py "$PLY_FILE" -o "${OUTPUT_DIR}/${SCENE_NAME}_viewer"
 
 echo ""
 echo "============================================"
@@ -62,4 +64,8 @@ echo "  Done! Output files:"
 echo "============================================"
 ls -lh ${OUTPUT_DIR}/${SCENE_NAME}*.ply ${OUTPUT_DIR}/${SCENE_NAME}*.html 2>/dev/null
 echo ""
-echo "Open the .html files in a browser to view results."
+echo "Quick preview: open the .html files in a browser."
+echo ""
+echo "Full-resolution viewer:"
+echo "  cd ${OUTPUT_DIR}/${SCENE_NAME}_viewer && python -m http.server 8080"
+echo "  Then open: http://localhost:8080"

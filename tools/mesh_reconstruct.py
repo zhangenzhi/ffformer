@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Render ForestFormer3D predictions as shaded solid-looking point clouds.
 
-Instead of mesh reconstruction (which deforms tree shapes), this uses
-normal-estimated point splatting with Phong lighting — each point becomes
-a small shaded disc oriented by its surface normal, giving a solid 3D
-appearance while preserving the true tree shape.
+Uses torch GPU for fast KNN-based normal estimation (handles 100M+ points),
+with chunked processing to avoid OOM. Falls back to Open3D CPU if no GPU.
 
 Usage:
     python tools/mesh_reconstruct.py work_dirs/test_single/scene.ply
-    python tools/mesh_reconstruct.py scene.ply --max-points 300000
+    python tools/mesh_reconstruct.py scene.ply --max-points 5000000
+    python tools/mesh_reconstruct.py scene.ply --device cpu
 """
 import argparse
 import base64
@@ -20,28 +19,32 @@ import time
 import numpy as np
 
 try:
-    import open3d as o3d
+    import torch
+    HAS_TORCH = True
 except ImportError:
-    print("Error: open3d required.")
-    sys.exit(1)
+    HAS_TORCH = False
 
-
-INSTANCE_COLORS = [
+INSTANCE_COLORS = np.array([
     (228,26,28),(55,126,184),(77,175,74),(152,78,163),(255,127,0),
     (255,255,51),(166,86,40),(247,129,191),(153,153,153),(102,194,165),
     (252,141,98),(141,160,203),(231,41,138),(34,139,34),(210,180,140),
     (0,191,255),(221,160,221),(127,255,0),(255,215,0),(70,130,180),
     (240,128,128),(176,224,230),(205,133,63),(188,189,34),(148,0,211),
     (0,206,209),
-]
+], dtype=np.uint8)
 SEMANTIC_COLORS = {0: (110,95,80), 1: (180,130,50), 2: (40,160,40)}
-UNASSIGNED_COLOR = (60, 60, 60)
+UNASSIGNED_COLOR = np.array([60, 60, 60], dtype=np.uint8)
 
 
-def parse_ply(filepath):
-    fields, num_verts = [], 0
+def parse_ply_numpy(filepath):
+    """Fast numpy-based ASCII PLY parser."""
+    fields = []
+    num_verts = 0
+    header_lines = 0
+
     with open(filepath, 'r') as f:
         for line in f:
+            header_lines += 1
             line = line.strip()
             if line.startswith('element vertex'):
                 num_verts = int(line.split()[-1])
@@ -49,20 +52,113 @@ def parse_ply(filepath):
                 fields.append(line.split()[-1])
             elif line == 'end_header':
                 break
-        data = {fn: [] for fn in fields}
-        for i, line in enumerate(f):
-            if i >= num_verts:
-                break
-            vals = line.strip().split()
-            for j, fn in enumerate(fields):
-                data[fn].append(float(vals[j]))
-    for fn in fields:
-        data[fn] = np.array(data[fn])
-    return data, num_verts
+
+    print(f'  {num_verts:,} points, parsing ...', end=' ', flush=True)
+    t0 = time.time()
+    data = np.loadtxt(filepath, skiprows=header_lines, max_rows=num_verts)
+    print(f'{time.time() - t0:.1f}s')
+
+    col = {name: idx for idx, name in enumerate(fields)}
+    return data, col, num_verts
 
 
-def estimate_normals(xyz, radius=0.5, max_nn=30):
-    """Estimate normals using Open3D."""
+def voxel_downsample(xyz, max_points):
+    """Voxel-based downsampling preserving spatial structure."""
+    if max_points <= 0 or len(xyz) <= max_points:
+        return np.arange(len(xyz))
+
+    lo, hi = 0.05, 50.0
+    best_idx = None
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        voxel_ids = np.floor(xyz / mid).astype(np.int64)
+        packed = np.ascontiguousarray(voxel_ids).view(
+            np.dtype((np.void, voxel_ids.dtype.itemsize * 3)))
+        _, idx = np.unique(packed, return_index=True)
+        if len(idx) > max_points:
+            lo = mid
+        else:
+            hi = mid
+            best_idx = idx
+    if best_idx is None or len(best_idx) > max_points:
+        best_idx = np.random.choice(len(xyz), max_points, replace=False)
+    return np.sort(best_idx)
+
+
+def estimate_normals_torch(xyz, k=30, chunk_size=100_000, device='cuda'):
+    """GPU-accelerated KNN normal estimation using torch.
+
+    Processes in chunks to handle arbitrarily large point clouds.
+    """
+    N = len(xyz)
+    normals = np.zeros_like(xyz)
+    xyz_t = torch.from_numpy(xyz).float().to(device)
+
+    print(f'  Estimating normals on {device} ({N:,} pts, k={k}) ...', flush=True)
+    t0 = time.time()
+
+    for start in range(0, N, chunk_size):
+        end = min(start + chunk_size, N)
+        chunk = xyz_t[start:end]  # (C, 3)
+
+        # KNN via batched cdist (chunked to avoid OOM on distance matrix)
+        # For each query point, find k nearest neighbors
+        knn_chunk = min(chunk_size * 4, N)  # search window
+        best_normals = torch.zeros(end - start, 3, device=device)
+
+        # Use a sliding search window around the chunk
+        search_start = max(0, start - knn_chunk // 2)
+        search_end = min(N, end + knn_chunk // 2)
+        if search_end - search_start < k:
+            search_start, search_end = 0, N
+        search_pts = xyz_t[search_start:search_end]
+
+        # Compute distances in sub-chunks to limit memory
+        sub_chunk = 10_000
+        for ss in range(0, end - start, sub_chunk):
+            se = min(ss + sub_chunk, end - start)
+            q = chunk[ss:se]  # (sc, 3)
+
+            # Pairwise distances
+            dists = torch.cdist(q, search_pts)  # (sc, search_N)
+            _, knn_idx = dists.topk(k, largest=False)  # (sc, k)
+
+            # Gather neighbor points
+            neighbors = search_pts[knn_idx]  # (sc, k, 3)
+
+            # PCA for normals: covariance of neighbors
+            centered = neighbors - neighbors.mean(dim=1, keepdim=True)
+            cov = torch.bmm(centered.transpose(1, 2), centered) / k  # (sc, 3, 3)
+
+            # Eigendecomposition — normal is eigenvector of smallest eigenvalue
+            eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+            best_normals[ss:se] = eigenvectors[:, :, 0]  # smallest eigenvalue
+
+        normals[start:end] = best_normals.cpu().numpy()
+
+        pct = end * 100 // N
+        elapsed = time.time() - t0
+        if end < N:
+            eta = elapsed / end * (N - end)
+            print(f'\r  Normals: {pct}% ({end:,}/{N:,}) ETA {eta:.0f}s  ',
+                  end='', flush=True)
+
+    # Orient normals: flip those pointing downward
+    down_mask = normals[:, 2] < -0.5
+    normals[down_mask] *= -1
+
+    # Normalize
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms[norms < 1e-8] = 1.0
+    normals /= norms
+
+    print(f'\r  Normals done: {time.time() - t0:.1f}s                    ')
+    return normals.astype(np.float32)
+
+
+def estimate_normals_cpu(xyz, radius=0.5, max_nn=30):
+    """Fallback: Open3D CPU normal estimation."""
+    import open3d as o3d
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz)
     pcd.estimate_normals(
@@ -70,7 +166,6 @@ def estimate_normals(xyz, radius=0.5, max_nn=30):
             radius=radius, max_nn=max_nn))
     pcd.orient_normals_consistent_tangent_plane(k=10)
     normals = np.asarray(pcd.normals, dtype=np.float32)
-    # Flip normals that point downward (trees generally face outward/up)
     down_mask = normals[:, 2] < -0.5
     normals[down_mask] *= -1
     return normals
@@ -80,57 +175,74 @@ def main():
     parser = argparse.ArgumentParser(
         description='Render tree point clouds with normal-based shading')
     parser.add_argument('input', help='PLY prediction file')
-    parser.add_argument('--max-points', type=int, default=0,
-                        help='Max points to render (0 = all)')
+    parser.add_argument('--max-points', type=int, default=5_000_000,
+                        help='Max points for HTML viewer (default: 5M, 0 = all)')
+    parser.add_argument('--device', default='auto',
+                        help='Device for normal estimation: cuda, cpu, or auto')
     parser.add_argument('--output-dir')
     args = parser.parse_args()
 
+    # Resolve device
+    if args.device == 'auto':
+        device = 'cuda' if (HAS_TORCH and torch.cuda.is_available()) else 'cpu'
+    else:
+        device = args.device
+    print(f'Device: {device}')
+
     print(f'Loading {args.input} ...')
-    data, n_total = parse_ply(args.input)
-    xyz = np.column_stack([data['x'], data['y'], data['z']]).astype(np.float32)
-    sem = data['semantic_pred'].astype(int)
-    inst = data['instance_pred'].astype(int)
-    print(f'  {n_total:,} points')
+    data, col, n_total = parse_ply_numpy(args.input)
+    xyz = data[:, [col['x'], col['y'], col['z']]].astype(np.float32)
+    sem = data[:, col['semantic_pred']].astype(int)
+    inst = data[:, col['instance_pred']].astype(int)
 
     # Subsample if needed
     if args.max_points > 0 and n_total > args.max_points:
-        idx = np.random.choice(n_total, args.max_points, replace=False)
+        print(f'  Voxel downsampling {n_total:,} -> {args.max_points:,} ...',
+              end=' ', flush=True)
+        t0 = time.time()
+        idx = voxel_downsample(xyz, args.max_points)
         xyz = xyz[idx]; sem = sem[idx]; inst = inst[idx]
-        print(f'  Subsampled to {args.max_points:,}')
+        print(f'{len(xyz):,} points, {time.time() - t0:.1f}s')
 
     N = len(xyz)
 
-    # Assign colors by instance (trees) or semantic (ground)
-    colors = np.zeros((N, 3), dtype=np.uint8)
-    for i in range(N):
-        if inst[i] >= 0:
-            c = INSTANCE_COLORS[int(inst[i]) % len(INSTANCE_COLORS)]
-        else:
-            c = SEMANTIC_COLORS.get(int(sem[i]), UNASSIGNED_COLOR)
-        colors[i] = c
+    # Assign colors vectorized
+    colors = np.tile(UNASSIGNED_COLOR, (N, 1))
+    tree_mask = inst >= 0
+    colors[tree_mask] = INSTANCE_COLORS[inst[tree_mask] % len(INSTANCE_COLORS)]
+    ground_mask = (~tree_mask) & (sem == 0)
+    colors[ground_mask] = np.array(SEMANTIC_COLORS[0], dtype=np.uint8)
 
     # Estimate normals
-    print('Estimating normals ...')
-    t0 = time.time()
-    normals = estimate_normals(xyz)
-    print(f'  Done ({time.time()-t0:.1f}s)')
+    if device == 'cuda' and HAS_TORCH:
+        normals = estimate_normals_torch(xyz, k=30, device=device)
+    else:
+        print('  Using Open3D CPU for normals (slower) ...')
+        normals = estimate_normals_cpu(xyz)
 
     # Pack binary: pos(3xf32) + normal(3xf16) + color(3xU8) + flag(U8)
     # = 12 + 6 + 3 + 1 = 22 bytes per point
-    print('Building viewer ...')
-    buf = bytearray(N * 22)
-    for i in range(N):
-        nx = int(np.float16(normals[i, 0]).view(np.uint16))
-        ny = int(np.float16(normals[i, 1]).view(np.uint16))
-        nz = int(np.float16(normals[i, 2]).view(np.uint16))
-        flag = 255 if inst[i] >= 0 else (80 if sem[i] == 0 else 0)
-        struct.pack_into('<fff3H3BB', buf, i * 22,
-                         xyz[i, 0], xyz[i, 1], xyz[i, 2],
-                         nx, ny, nz,
-                         colors[i, 0], colors[i, 1], colors[i, 2],
-                         flag)
+    print('Building viewer ...', end=' ', flush=True)
+    t0 = time.time()
 
-    b64 = base64.b64encode(buf).decode('ascii')
+    # Vectorized packing
+    pos_bytes = xyz.tobytes()
+    normal_f16 = normals.astype(np.float16)
+    norm_bytes = normal_f16.tobytes()
+
+    flag_arr = np.zeros(N, dtype=np.uint8)
+    flag_arr[tree_mask] = 255
+    flag_arr[ground_mask] = 80
+
+    buf = bytearray(N * 22)
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape(N, 22)
+    arr[:, 0:12] = np.frombuffer(pos_bytes, dtype=np.uint8).reshape(N, 12)
+    arr[:, 12:18] = np.frombuffer(norm_bytes, dtype=np.uint8).reshape(N, 6)
+    arr[:, 18:21] = colors
+    arr[:, 21] = flag_arr
+
+    b64 = base64.b64encode(bytes(buf)).decode('ascii')
+    print(f'{time.time() - t0:.1f}s')
 
     n_trees = len(set(inst[inst >= 0]))
     basename = os.path.splitext(os.path.basename(args.input))[0]
@@ -376,7 +488,7 @@ body{{background:#0d1117;font-family:'Segoe UI',Arial,sans-serif;overflow:hidden
 <body>
 <div id="hdr">
   <b>{basename}</b>
-  <span>Shaded Point Cloud &mdash; {n_trees} trees, {N:,} points</span>
+  <span>Shaded Point Cloud &mdash; {n_trees} trees, {N:,} / {n_total:,} points</span>
 </div>
 <div class="wrap" id="p0"><canvas id="c0"></canvas></div>
 <div id="cp">
