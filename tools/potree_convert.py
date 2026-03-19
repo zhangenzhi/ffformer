@@ -44,49 +44,56 @@ POINT_SIZE = 16
 
 
 def parse_ply_header(filepath):
-    """Parse PLY header, return field names, vertex count, header byte offset."""
+    """Parse PLY header, return field names, vertex count, header line count."""
     fields = []
     num_vertices = 0
+    header_lines = 0
     with open(filepath, 'r') as f:
         for line in f:
+            header_lines += 1
             stripped = line.strip()
             if stripped.startswith('element vertex'):
                 num_vertices = int(stripped.split()[-1])
             elif stripped.startswith('property'):
                 fields.append(stripped.split()[-1])
             elif stripped == 'end_header':
-                header_end = f.tell()
                 break
     col = {name: idx for idx, name in enumerate(fields)}
-    return col, num_vertices, header_end, len(fields)
+    return col, num_vertices, header_lines, len(fields)
 
 
-def load_ply_chunked(filepath, col, num_vertices, header_end, num_fields,
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+
+
+def load_ply_chunked(filepath, col, num_vertices, header_lines, num_fields,
                      chunk_size=5_000_000):
-    """Generator: yield chunks of (xyz, colors, flags) from PLY."""
-    with open(filepath, 'r') as f:
-        # Skip header
-        for line in f:
-            if line.strip() == 'end_header':
-                break
+    """Generator: yield chunks of (xyz, colors, flags) from PLY.
 
-        buf = []
-        count = 0
-        for line in f:
-            if count >= num_vertices:
-                break
-            buf.append(line)
-            count += 1
-            if len(buf) >= chunk_size:
-                yield _process_chunk(buf, col)
-                buf = []
-        if buf:
-            yield _process_chunk(buf, col)
+    Uses pandas for ~5-10x faster parsing than np.loadtxt.
+    """
+    fields = list(col.keys())
+
+    for start in range(0, num_vertices, chunk_size):
+        nrows = min(chunk_size, num_vertices - start)
+        skip = header_lines + start
+
+        if HAS_PANDAS:
+            df = pd.read_csv(filepath, sep=r'\s+', header=None, names=fields,
+                             skiprows=skip, nrows=nrows,
+                             dtype=np.float64, engine='c')
+            data = df.values
+        else:
+            data = np.loadtxt(filepath, skiprows=skip, max_rows=nrows)
+
+        yield _process_chunk(data, col)
 
 
-def _process_chunk(lines, col):
-    """Convert text lines to numpy arrays."""
-    data = np.loadtxt(lines)
+def _process_chunk(data, col):
+    """Convert data array to (xyz, colors, flags)."""
     if data.ndim == 1:
         data = data.reshape(1, -1)
 
@@ -171,96 +178,127 @@ def pack_points(xyz, colors, flags):
 def build_octree(filepath, output_dir, node_budget=50_000, max_depth=8):
     """Build octree from PLY file.
 
-    Strategy:
-    - First pass: compute bounding box
-    - Second pass: assign each point to deepest octree node
-    - For each node, randomly subsample to node_budget points
-    - Parent nodes aggregate subsampled children
+    Single-pass strategy:
+    - Read chunks, compute bbox incrementally, cache chunks to temp file
+    - Then distribute cached data to octree leaf nodes
+    - Subsample and build hierarchy bottom-up
     """
-    col, num_vertices, header_end, num_fields = parse_ply_header(filepath)
+    col, num_vertices, header_lines, num_fields = parse_ply_header(filepath)
     print(f'Total points: {num_vertices:,}')
     print(f'Node budget: {node_budget:,}, max depth: {max_depth}')
 
-    # --- Pass 1: bounding box ---
-    print('Pass 1: Computing bounding box ...', end=' ', flush=True)
-    t0 = time.time()
-    bbox_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
-    bbox_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
-
-    for xyz, _, _ in load_ply_chunked(filepath, col, num_vertices,
-                                       header_end, num_fields):
-        bbox_min = np.minimum(bbox_min, xyz.min(axis=0))
-        bbox_max = np.maximum(bbox_max, xyz.max(axis=0))
-
-    # Make cubic bounding box
-    bbox_size = (bbox_max - bbox_min).max()
-    bbox_center = (bbox_min + bbox_max) / 2
-    bbox_min = bbox_center - bbox_size / 2
-    bbox_max = bbox_center + bbox_size / 2
-    # Small padding
-    bbox_min -= bbox_size * 0.001
-    bbox_size *= 1.002
-
-    print(f'{time.time() - t0:.1f}s')
-    print(f'  BBox: [{bbox_min[0]:.1f}, {bbox_min[1]:.1f}, {bbox_min[2]:.1f}] - '
-          f'[{bbox_max[0]:.1f}, {bbox_max[1]:.1f}, {bbox_max[2]:.1f}], '
-          f'size={bbox_size:.1f}')
-
-    # Determine appropriate depth
-    # At depth d, there are 8^d leaf nodes. We want ~node_budget points per node.
-    ideal_depth = 0
-    for d in range(1, max_depth + 1):
-        pts_per_leaf = num_vertices / (8 ** d)
-        if pts_per_leaf < node_budget:
-            ideal_depth = d
-            break
-    else:
-        ideal_depth = max_depth
-    print(f'  Using depth: {ideal_depth}')
-
-    # --- Pass 2: distribute points to leaf nodes ---
-    print('Pass 2: Distributing points to octree nodes ...')
-    t0 = time.time()
-
-    # We'll store point indices per leaf node, then subsample
-    # For memory efficiency with 129M points, we write leaf bins to disk
     tiles_dir = os.path.join(output_dir, 'tiles')
     os.makedirs(tiles_dir, exist_ok=True)
 
-    # Track nodes: key -> {count, file_handle}
+    # --- Single pass: bbox + cache packed data ---
+    print('Pass 1: Reading & caching ...', flush=True)
+    t0 = time.time()
+
+    bbox_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    bbox_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+
+    # Cache packed points + xyz to a temp binary file for fast re-read
+    cache_path = os.path.join(output_dir, '_cache.bin')
+    # Each cached record: xyz(3×f32=12) + packed(16) = 28 bytes
+    CACHE_REC = 28
+    total_processed = 0
+
+    with open(cache_path, 'wb') as cache_f:
+        for xyz, colors, flags in load_ply_chunked(filepath, col, num_vertices,
+                                                    header_lines, num_fields):
+            n = len(xyz)
+            bbox_min = np.minimum(bbox_min, xyz.min(axis=0))
+            bbox_max = np.maximum(bbox_max, xyz.max(axis=0))
+
+            # Write cache: xyz_f32(12) + packed(16) per point
+            packed_arr = np.zeros((n, POINT_SIZE), dtype=np.uint8)
+            packed_arr[:, 0:12] = xyz.astype(np.float32).view(np.uint8).reshape(n, 12)
+            packed_arr[:, 12:15] = colors.astype(np.uint8)
+            packed_arr[:, 15] = flags.astype(np.uint8)
+
+            cache_rec = np.zeros((n, CACHE_REC), dtype=np.uint8)
+            cache_rec[:, 0:12] = xyz.astype(np.float32).view(np.uint8).reshape(n, 12)
+            cache_rec[:, 12:28] = packed_arr
+            cache_f.write(cache_rec.tobytes())
+
+            total_processed += n
+            pct = total_processed * 100 // num_vertices
+            print(f'\r  Read: {pct}% ({total_processed:,}/{num_vertices:,})  ',
+                  end='', flush=True)
+
+    # Make cubic bounding box
+    bbox_size = float((bbox_max - bbox_min).max())
+    bbox_center = (bbox_min + bbox_max) / 2
+    bbox_min = (bbox_center - bbox_size / 2).astype(np.float64)
+    bbox_min -= bbox_size * 0.001
+    bbox_size *= 1.002
+
+    print(f'\n  {time.time() - t0:.1f}s')
+    print(f'  BBox size={bbox_size:.1f}')
+
+    # Determine depth
+    ideal_depth = max_depth
+    for d in range(1, max_depth + 1):
+        if num_vertices / (8 ** d) < node_budget:
+            ideal_depth = d
+            break
+    print(f'  Depth: {ideal_depth}')
+
+    # --- Pass 2: distribute from cache (binary, very fast) ---
+    print('Pass 2: Distributing to octree nodes ...', flush=True)
+    t0 = time.time()
+
     node_files = {}
     node_counts = defaultdict(int)
     total_processed = 0
+    chunk_size = 5_000_000
 
-    for xyz, colors, flags in load_ply_chunked(filepath, col, num_vertices,
-                                                header_end, num_fields):
-        n = len(xyz)
-        # Compute leaf keys
-        leaf_keys = octree_keys_batch(xyz, bbox_min, bbox_size, ideal_depth)
+    with open(cache_path, 'rb') as cache_f:
+        while total_processed < num_vertices:
+            n = min(chunk_size, num_vertices - total_processed)
+            raw = cache_f.read(n * CACHE_REC)
+            if not raw:
+                break
+            rec = np.frombuffer(raw, dtype=np.uint8).reshape(-1, CACHE_REC)
+            n = len(rec)
 
-        # Group by key and write to per-node temp files
-        unique_keys = np.unique(leaf_keys)
-        for uk in unique_keys:
-            mask = leaf_keys == uk
-            key_str = numeric_key_to_string(int(uk), ideal_depth)
+            # Extract xyz for octree key computation
+            xyz = rec[:, 0:12].copy().view(np.float32).reshape(n, 3)
+            packed = rec[:, 12:28]
 
-            # Pack and append to file
-            packed = pack_points(xyz[mask], colors[mask], flags[mask])
+            # Compute leaf keys
+            leaf_keys = octree_keys_batch(xyz, bbox_min, bbox_size, ideal_depth)
 
-            if key_str not in node_files:
-                fpath = os.path.join(tiles_dir, f'_tmp_{key_str}.bin')
-                node_files[key_str] = open(fpath, 'wb')
-            node_files[key_str].write(packed)
-            node_counts[key_str] += int(mask.sum())
+            # Group by key using argsort (faster than per-key masking)
+            sort_idx = np.argsort(leaf_keys)
+            sorted_keys = leaf_keys[sort_idx]
+            sorted_packed = packed[sort_idx]
 
-        total_processed += n
-        pct = total_processed * 100 // num_vertices
-        print(f'\r  {pct}% ({total_processed:,}/{num_vertices:,}) '
-              f'nodes={len(node_counts)}  ', end='', flush=True)
+            # Find boundaries
+            boundaries = np.where(np.diff(sorted_keys) != 0)[0] + 1
+            boundaries = np.concatenate([[0], boundaries, [n]])
 
-    # Close temp files
+            for i in range(len(boundaries) - 1):
+                s, e = boundaries[i], boundaries[i + 1]
+                uk = int(sorted_keys[s])
+                key_str = numeric_key_to_string(uk, ideal_depth)
+
+                if key_str not in node_files:
+                    fpath = os.path.join(tiles_dir, f'_tmp_{key_str}.bin')
+                    node_files[key_str] = open(fpath, 'wb')
+                node_files[key_str].write(sorted_packed[s:e].tobytes())
+                node_counts[key_str] += e - s
+
+            total_processed += n
+            pct = total_processed * 100 // num_vertices
+            print(f'\r  Distribute: {pct}% ({total_processed:,}/{num_vertices:,}) '
+                  f'nodes={len(node_counts)}  ', end='', flush=True)
+
     for fh in node_files.values():
         fh.close()
+
+    # Remove cache
+    os.remove(cache_path)
 
     print(f'\n  {time.time() - t0:.1f}s, {len(node_counts)} leaf nodes')
 
@@ -488,37 +526,19 @@ const center = new THREE.Vector3(
 );
 const R = bboxSize / 2;
 
-// Shader
-const vertShader = `
-attribute float flag;
-uniform float uSize;
-uniform float uDimAlpha;
-varying vec3 vColor;
-varying float vAlpha;
-void main() {
-    vColor = color;
-    vAlpha = flag > 0.3 ? 1.0 : uDimAlpha;
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = uSize * (400.0 / (-mv.z));
-    gl_PointSize = max(gl_PointSize, 1.0);
-    gl_Position = projectionMatrix * mv;
-}`;
-const fragShader = `
-varying vec3 vColor;
-varying float vAlpha;
-void main() {
-    vec2 p = gl_PointCoord - 0.5;
-    float d = dot(p, p);
-    if (d > 0.25) discard;
-    float edge = smoothstep(0.25, 0.15, d);
-    float shade = 1.0 - d * 0.4;
-    gl_FragColor = vec4(vColor * shade, vAlpha * edge);
-}`;
+// Point size based on scene scale
+let basePointSize = Math.max(1.0, R * 0.02);
+console.log('Scene R:', R, 'basePointSize:', basePointSize, 'center:', center);
+
+// Debug: axes helper at scene center (R/2 long, visible as RGB lines)
+const axes = new THREE.AxesHelper(R);
+axes.position.copy(center);
+scene.add(axes);
 
 // Node management
 const loadedNodes = {};  // key -> THREE.Points
 const loadingNodes = new Set();
-const MAX_CONCURRENT = 6;
+const MAX_CONCURRENT = 12;
 let loadQueue = [];
 let visiblePoints = 0;
 let lodMultiplier = 1.0;
@@ -595,19 +615,21 @@ async function loadNode(key) {
             flags[i] = arr[o+15] / 255;
         }
 
+        // Debug: log first loaded node stats
+        if (Object.keys(loadedNodes).length === 0) {
+            console.log('First node:', key, 'n:', n,
+                'pos[0]:', positions[0], positions[1], positions[2],
+                'col[0]:', colors[0], colors[1], colors[2]);
+        }
+
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
         geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-        geo.setAttribute('flag', new THREE.Float32BufferAttribute(flags, 1));
 
-        const mat = new THREE.ShaderMaterial({
-            uniforms: {
-                uSize: {value: R * 0.008},
-                uDimAlpha: {value: 0.12}
-            },
-            vertexShader, fragmentShader: fragShader,
-            vertexColors: true, transparent: true,
-            depthWrite: true, depthTest: true
+        const mat = new THREE.PointsMaterial({
+            size: basePointSize,
+            vertexColors: true,
+            sizeAttenuation: true,
         });
 
         const points = new THREE.Points(geo, mat);
@@ -632,7 +654,7 @@ function unloadNode(key) {
 }
 
 // LOD update: decide which nodes to show/hide/load
-const SCREEN_THRESHOLD = 150;  // pixels: if node > this, load children
+const SCREEN_THRESHOLD = 50;  // pixels: if node > this, load children
 
 function updateLOD() {
     const toLoad = [];
@@ -693,7 +715,7 @@ function updateLOD() {
 }
 
 // Camera controls
-let sph = {theta: -Math.PI/2, phi: Math.PI/3, radius: R * 3.5};
+let sph = {theta: -Math.PI/2, phi: Math.PI/3, radius: R * 2.0};
 let tgt = center.clone();
 let isDrag = false, isPan = false, lx = 0, ly = 0;
 
@@ -757,16 +779,17 @@ onResize();
 document.getElementById('psize').oninput = function() {
     const v = this.value / 25.0;
     for (const obj of Object.values(loadedNodes)) {
-        obj.material.uniforms.uSize.value = R * 0.008 * v;
+        obj.material.size = basePointSize * v;
     }
 };
 document.getElementById('bgsel').onchange = function() {
     scene.background = new THREE.Color(this.value);
 };
 document.getElementById('unsel').onchange = function() {
-    const alpha = this.value === 'hide' ? 0.0 : this.value === 'dim' ? 0.12 : 1.0;
+    const alpha = this.value === 'hide' ? 0.0 : this.value === 'dim' ? 0.5 : 1.0;
     for (const obj of Object.values(loadedNodes)) {
-        obj.material.uniforms.uDimAlpha.value = alpha;
+        obj.material.opacity = alpha;
+        obj.material.transparent = alpha < 1.0;
     }
 };
 document.getElementById('lod').oninput = function() {
@@ -785,7 +808,7 @@ function animate(t) {
     requestAnimationFrame(animate);
 
     // Update LOD every 200ms
-    if (t - lastLODUpdate > 200) {
+    if (t - lastLODUpdate > 100) {
         updateLOD();
         lastLODUpdate = t;
 
