@@ -9,6 +9,7 @@ Usage:
     python tools/vis_open3d.py scene.ply --max-points 5000000
 """
 import argparse
+import os
 import sys
 import time
 
@@ -67,22 +68,17 @@ def main():
     timings = []
     t_total = time.time()
 
-    # --- 1. Parse PLY (skip-read if downsampling) ---
+    # --- 1. Parse PLY (with binary cache) ---
+    cache_path = args.input + '.cache.npy'
     t0 = time.time()
-    if args.max_points > 0 and num_vertices > args.max_points:
-        # Only read the lines we need — skip 90%+ of the file
-        sample_idx = set(np.random.choice(num_vertices, args.max_points, replace=False).tolist())
-        rows = []
-        with open(args.input, 'r') as f:
-            for _ in range(header_lines):
-                f.readline()
-            for i, line in enumerate(f):
-                if i >= num_vertices:
-                    break
-                if i in sample_idx:
-                    rows.append(line)
-        data = np.loadtxt(rows)
+
+    if os.path.exists(cache_path) and os.path.getmtime(cache_path) >= os.path.getmtime(args.input):
+        # Fast path: load from binary cache
+        data = np.load(cache_path, mmap_mode='r')
+        print(f'  (loaded from cache: {cache_path})')
     else:
+        # Slow path: parse ASCII, then save cache
+        print(f'  Parsing ASCII (first time, building cache) ...')
         try:
             import pandas as pd
             data = pd.read_csv(args.input, sep=r'\s+', header=None,
@@ -90,6 +86,9 @@ def main():
                                dtype=np.float64, engine='c').values
         except ImportError:
             data = np.loadtxt(args.input, skiprows=header_lines, max_rows=num_vertices)
+        np.save(cache_path, data)
+        print(f'  Cache saved: {cache_path} ({os.path.getsize(cache_path) / 1e9:.1f} GB)')
+
     dt = time.time() - t0
     timings.append(('Parse PLY', dt))
 
@@ -99,8 +98,15 @@ def main():
     dt = time.time() - t0
     timings.append(('Extract XYZ', dt))
 
-    # --- 3. (already sampled during read) ---
-    timings.append(('Downsample', 0.0))
+    # --- 3. Downsample ---
+    t0 = time.time()
+    if args.max_points > 0 and len(xyz) > args.max_points:
+        idx = np.random.choice(len(xyz), args.max_points, replace=False)
+        idx.sort()
+        xyz = xyz[idx]
+        data = data[idx]
+    dt = time.time() - t0
+    timings.append(('Downsample', dt))
 
     n = len(xyz)
 
