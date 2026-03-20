@@ -67,15 +67,29 @@ def main():
     timings = []
     t_total = time.time()
 
-    # --- 1. Parse PLY ---
+    # --- 1. Parse PLY (skip-read if downsampling) ---
     t0 = time.time()
-    try:
-        import pandas as pd
-        data = pd.read_csv(args.input, sep=r'\s+', header=None,
-                           skiprows=header_lines, nrows=num_vertices,
-                           dtype=np.float64, engine='c').values
-    except ImportError:
-        data = np.loadtxt(args.input, skiprows=header_lines, max_rows=num_vertices)
+    if args.max_points > 0 and num_vertices > args.max_points:
+        # Only read the lines we need — skip 90%+ of the file
+        sample_idx = set(np.random.choice(num_vertices, args.max_points, replace=False).tolist())
+        rows = []
+        with open(args.input, 'r') as f:
+            for _ in range(header_lines):
+                f.readline()
+            for i, line in enumerate(f):
+                if i >= num_vertices:
+                    break
+                if i in sample_idx:
+                    rows.append(line)
+        data = np.loadtxt(rows)
+    else:
+        try:
+            import pandas as pd
+            data = pd.read_csv(args.input, sep=r'\s+', header=None,
+                               skiprows=header_lines, nrows=num_vertices,
+                               dtype=np.float64, engine='c').values
+        except ImportError:
+            data = np.loadtxt(args.input, skiprows=header_lines, max_rows=num_vertices)
     dt = time.time() - t0
     timings.append(('Parse PLY', dt))
 
@@ -85,15 +99,8 @@ def main():
     dt = time.time() - t0
     timings.append(('Extract XYZ', dt))
 
-    # --- 3. Downsample ---
-    t0 = time.time()
-    if args.max_points > 0 and len(xyz) > args.max_points:
-        idx = np.random.choice(len(xyz), args.max_points, replace=False)
-        idx.sort()
-        xyz = xyz[idx]
-        data = data[idx]
-    dt = time.time() - t0
-    timings.append(('Downsample', dt))
+    # --- 3. (already sampled during read) ---
+    timings.append(('Downsample', 0.0))
 
     n = len(xyz)
 
