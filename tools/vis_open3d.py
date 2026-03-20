@@ -176,25 +176,21 @@ def main():
 
     # Switch to LOD during interaction, back to full when idle
     if n > lod_n:
-        _timer = None
+        _idle_count = [0]
 
         def on_interact(*args):
-            nonlocal _timer
             actor_full.SetVisibility(False)
             actor_lod.SetVisibility(True)
-            # Schedule switch back after 500ms idle
-            if _timer is not None:
-                _timer.cancel()
-            import threading
-            _timer = threading.Timer(0.5, _restore_full)
-            _timer.start()
+            _idle_count[0] = 0
 
-        def _restore_full():
+        def on_end_interact(*args):
+            # Restore full resolution immediately when interaction ends
             actor_lod.SetVisibility(False)
             actor_full.SetVisibility(True)
             pl.render()
 
         pl.iren.add_observer('InteractionEvent', on_interact)
+        pl.iren.add_observer('EndInteractionEvent', on_end_interact)
 
     dt = time.time() - t0
     timings.append(('Init renderer', dt))
