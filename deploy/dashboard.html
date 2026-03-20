@@ -55,17 +55,56 @@ header .dot.off { background:var(--red); }
 .btn-primary:hover { background:#2ea043; }
 .btn-primary:disabled { background:var(--bg3); color:var(--text2); cursor:not-allowed; }
 
+/* Progress bar with steps */
+.progress-container { margin-top:10px; display:none; }
+.progress-container.show { display:block; }
+.progress-step-label { font-size:11px; color:var(--accent); margin-bottom:4px;
+  display:flex; justify-content:space-between; align-items:center; }
+.progress-step-label .elapsed { color:var(--text2); font-size:10px; }
+.progress { height:4px; background:var(--bg3); border-radius:2px; overflow:hidden; }
+.progress .bar { height:100%; background:var(--accent); border-radius:2px;
+  transition:width 0.4s ease; }
+.progress .bar.indeterminate { width:30%!important;
+  animation:indeterminate 1.5s ease-in-out infinite; }
+@keyframes indeterminate {
+  0% { margin-left:0; }
+  50% { margin-left:70%; }
+  100% { margin-left:0; }
+}
+.progress-steps { display:flex; justify-content:space-between; margin-top:6px; }
+.progress-steps .step { font-size:9px; color:var(--text2); text-align:center; flex:1;
+  position:relative; padding-top:10px; }
+.progress-steps .step::before { content:''; position:absolute; top:0; left:50%;
+  transform:translateX(-50%); width:6px; height:6px; border-radius:50%;
+  background:var(--bg3); border:1px solid var(--border); }
+.progress-steps .step.done::before { background:var(--green); border-color:var(--green); }
+.progress-steps .step.active::before { background:var(--accent); border-color:var(--accent);
+  box-shadow:0 0 6px var(--accent); }
+
+/* Sidebar tabs */
+.sidebar-tabs { display:flex; border-bottom:1px solid var(--border); }
+.sidebar-tabs button { flex:1; background:none; border:none; color:var(--text2);
+  padding:8px; font-size:11px; font-weight:600; cursor:pointer; text-transform:uppercase;
+  letter-spacing:0.5px; border-bottom:2px solid transparent; transition:all 0.15s; }
+.sidebar-tabs button.active { color:var(--accent); border-bottom-color:var(--accent); }
+.sidebar-tabs button:hover { color:var(--text); }
+
 /* Task list */
 .task-list { flex:1; overflow-y:auto; padding:8px; }
 .task-list h3 { font-size:11px; color:var(--text2); text-transform:uppercase;
   letter-spacing:0.8px; padding:8px; }
 .task-card { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
-  padding:12px; margin-bottom:8px; cursor:pointer; transition:all 0.15s; }
+  padding:12px; margin-bottom:8px; cursor:pointer; transition:all 0.15s; position:relative; }
 .task-card:hover { border-color:var(--accent); }
 .task-card.active { border-color:var(--accent); background:rgba(88,166,255,0.06); }
 .task-card .name { font-size:13px; font-weight:600; margin-bottom:4px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding-right:24px; }
 .task-card .meta { font-size:11px; color:var(--text2); display:flex; gap:8px; align-items:center; }
+.task-card .delete-btn { position:absolute; top:8px; right:8px; background:none; border:none;
+  color:var(--text2); cursor:pointer; font-size:14px; padding:2px 4px; border-radius:3px;
+  opacity:0; transition:all 0.15s; line-height:1; }
+.task-card:hover .delete-btn { opacity:1; }
+.task-card .delete-btn:hover { color:var(--red); background:rgba(248,81,73,0.1); }
 .badge { padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; }
 .badge.completed { background:rgba(63,185,80,0.15); color:var(--green); }
 .badge.processing { background:rgba(210,153,34,0.15); color:var(--orange); }
@@ -73,6 +112,26 @@ header .dot.off { background:var(--red); }
 .task-stats { margin-top:8px; font-size:11px; color:var(--text2);
   display:grid; grid-template-columns:1fr 1fr; gap:2px 12px; }
 .task-stats .val { color:var(--text); font-weight:600; }
+
+/* Files panel */
+.files-panel { flex:1; overflow-y:auto; padding:8px; display:none; }
+.files-panel.show { display:block; }
+.file-item { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+  padding:10px 12px; margin-bottom:6px; display:flex; align-items:center; gap:10px; }
+.file-item .file-icon { font-size:16px; flex-shrink:0; }
+.file-item .file-info { flex:1; min-width:0; }
+.file-item .file-name { font-size:12px; font-weight:600; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.file-item .file-meta { font-size:10px; color:var(--text2); margin-top:2px; }
+.file-item .file-actions { display:flex; gap:4px; flex-shrink:0; }
+.file-item .file-actions button, .file-item .file-actions a {
+  background:var(--bg3); border:1px solid var(--border); color:var(--text2);
+  padding:3px 8px; border-radius:4px; font-size:10px; cursor:pointer;
+  text-decoration:none; transition:all 0.15s; display:inline-block; }
+.file-item .file-actions button:hover, .file-item .file-actions a:hover {
+  border-color:var(--accent); color:var(--accent); }
+.file-item .file-actions .del-btn:hover { border-color:var(--red); color:var(--red); }
+.files-empty { text-align:center; color:var(--text2); font-size:12px; padding:24px; }
 
 /* Viewer */
 .viewer { flex:1; position:relative; background:var(--bg); }
@@ -106,14 +165,6 @@ header .dot.off { background:var(--red); }
   text-align:center; text-decoration:none; display:block; }
 .btn-secondary { background:var(--bg3); color:var(--text); border:1px solid var(--border); }
 .btn-secondary:hover { border-color:var(--accent); color:var(--accent); }
-
-/* Progress */
-.progress { height:3px; background:var(--bg3); border-radius:2px; margin-top:8px;
-  overflow:hidden; display:none; }
-.progress.show { display:block; }
-.progress .bar { height:100%; background:var(--accent); border-radius:2px;
-  transition:width 0.3s; animation:pulse 1.5s ease-in-out infinite; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width:6px; }
@@ -153,11 +204,32 @@ header .dot.off { background:var(--red); }
         </div>
       </div>
       <button class="btn btn-primary" id="uploadBtn" disabled>Upload & Process</button>
-      <div class="progress" id="progress"><div class="bar" id="progressBar"></div></div>
+      <div class="progress-container" id="progressContainer">
+        <div class="progress-step-label">
+          <span id="progressLabel">Uploading...</span>
+          <span class="elapsed" id="progressElapsed">0.0s</span>
+        </div>
+        <div class="progress"><div class="bar" id="progressBar" style="width:0%"></div></div>
+        <div class="progress-steps">
+          <div class="step" id="stepRead">Read</div>
+          <div class="step" id="stepSubsample">Subsample</div>
+          <div class="step" id="stepInfer">Infer</div>
+          <div class="step" id="stepSave">Save</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-tabs">
+      <button class="active" id="tabResults" onclick="switchTab('results')">Results</button>
+      <button id="tabFiles" onclick="switchTab('files')">Files</button>
     </div>
 
     <div class="task-list" id="taskList">
       <h3>Results</h3>
+    </div>
+
+    <div class="files-panel" id="filesPanel">
+      <div class="files-empty">No files yet</div>
     </div>
 
     <div class="downloads" id="downloads" style="display:none">
@@ -226,13 +298,17 @@ let camTarget = new THREE.Vector3(0,0,0);
 let isDrag=false, isPan=false, lx=0, ly=0;
 let currentPlyData = null;
 let R = 1;
+let pollingTimers = {};  // task_id -> interval id
+let currentTab = 'results';
 
 // ==================== UPLOAD ====================
 const dropArea = document.getElementById('dropArea');
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
-const progress = document.getElementById('progress');
+const progressContainer = document.getElementById('progressContainer');
 const progressBar = document.getElementById('progressBar');
+const progressLabel = document.getElementById('progressLabel');
+const progressElapsed = document.getElementById('progressElapsed');
 
 dropArea.addEventListener('click', () => fileInput.click());
 dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classList.add('dragover'); });
@@ -252,11 +328,113 @@ function selectFile(f) {
   uploadBtn.disabled = false;
 }
 
+// Step order for progress tracking
+const STEP_ORDER = ['uploading', 'reading', 'subsampling', 'inferring', 'saving', 'completed'];
+const STEP_MAP = {
+  'uploading': [],
+  'reading': ['stepRead'],
+  'subsampling': ['stepRead', 'stepSubsample'],
+  'inferring': ['stepRead', 'stepSubsample', 'stepInfer'],
+  'saving': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
+  'completed': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
+};
+const STEP_ACTIVE = {
+  'uploading': null,
+  'reading': 'stepRead',
+  'subsampling': 'stepSubsample',
+  'inferring': 'stepInfer',
+  'saving': 'stepSave',
+  'completed': null,
+};
+
+function updateProgressUI(data) {
+  const step = data.step || 'uploading';
+  const pct = data.progress || 0;
+
+  progressLabel.textContent = data.step_label || step;
+  progressBar.style.width = pct + '%';
+  progressBar.classList.toggle('indeterminate', step === 'inferring' && pct < 90);
+  progressElapsed.textContent = (data.elapsed || 0).toFixed(1) + 's';
+
+  // Update step dots
+  const doneSteps = STEP_MAP[step] || [];
+  const activeStep = STEP_ACTIVE[step] || null;
+  ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'].forEach(id => {
+    const el = document.getElementById(id);
+    el.classList.remove('done', 'active');
+    if (step === 'completed' || doneSteps.includes(id)) {
+      el.classList.add('done');
+    }
+    if (id === activeStep) {
+      el.classList.remove('done');
+      el.classList.add('active');
+    }
+  });
+}
+
+function startPolling(taskId) {
+  // Clear any existing polling for this task
+  if (pollingTimers[taskId]) clearInterval(pollingTimers[taskId]);
+
+  pollingTimers[taskId] = setInterval(async () => {
+    try {
+      const resp = await fetch(`${API}/task/${taskId}/status`);
+      const data = await resp.json();
+
+      // Update task data
+      taskData[taskId] = {
+        ...taskData[taskId],
+        ...data,
+        task_id: taskId,
+      };
+
+      // Update progress UI if this is the currently uploading task
+      if (progressContainer.classList.contains('show') && progressContainer.dataset.taskId === taskId) {
+        updateProgressUI(data);
+      }
+
+      renderTaskList();
+
+      if (data.status === 'completed') {
+        clearInterval(pollingTimers[taskId]);
+        delete pollingTimers[taskId];
+
+        // Hide progress, re-enable upload
+        setTimeout(() => {
+          progressContainer.classList.remove('show');
+          uploadBtn.disabled = false;
+        }, 600);
+
+        // Auto-select completed task
+        selectTask(taskId);
+        refreshFiles();
+      } else if (data.status === 'failed') {
+        clearInterval(pollingTimers[taskId]);
+        delete pollingTimers[taskId];
+
+        progressContainer.classList.remove('show');
+        uploadBtn.disabled = false;
+        alert('Processing failed: ' + (data.error || 'Unknown error'));
+      }
+    } catch (e) {
+      console.error('Polling error:', e);
+    }
+  }, 1000);
+}
+
 uploadBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
   uploadBtn.disabled = true;
-  progress.classList.add('show');
-  progressBar.style.width = '30%';
+
+  // Show progress immediately
+  progressContainer.classList.add('show');
+  progressBar.style.width = '0%';
+  progressBar.classList.remove('indeterminate');
+  progressLabel.textContent = 'Uploading...';
+  progressElapsed.textContent = '0.0s';
+  ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'].forEach(id => {
+    document.getElementById(id).classList.remove('done', 'active');
+  });
 
   const formData = new FormData();
   formData.append('file', selectedFile);
@@ -264,27 +442,121 @@ uploadBtn.addEventListener('click', async () => {
   const maxp = document.getElementById('paramMaxPts').value;
 
   try {
-    progressBar.style.width = '60%';
     const resp = await fetch(`${API}/predict?subsample=${sub}&max_points=${maxp}`, {
       method: 'POST', body: formData
     });
-    progressBar.style.width = '90%';
     const data = await resp.json();
 
     if (resp.ok) {
-      taskData[data.task_id] = data;
+      const taskId = data.task_id;
+      taskData[taskId] = {
+        task_id: taskId,
+        status: 'processing',
+        filename: selectedFile.name,
+        step: 'uploading',
+        step_label: 'Processing...',
+        progress: 5,
+      };
+      progressContainer.dataset.taskId = taskId;
       renderTaskList();
-      selectTask(data.task_id);
-      progressBar.style.width = '100%';
+
+      // Start polling for progress
+      startPolling(taskId);
     } else {
+      progressContainer.classList.remove('show');
+      uploadBtn.disabled = false;
       alert('Error: ' + (data.detail || JSON.stringify(data)));
     }
   } catch (e) {
+    progressContainer.classList.remove('show');
+    uploadBtn.disabled = false;
     alert('Request failed: ' + e.message);
   }
-
-  setTimeout(() => { progress.classList.remove('show'); uploadBtn.disabled = false; }, 500);
 });
+
+// ==================== SIDEBAR TABS ====================
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('tabResults').classList.toggle('active', tab === 'results');
+  document.getElementById('tabFiles').classList.toggle('active', tab === 'files');
+  document.getElementById('taskList').style.display = tab === 'results' ? 'block' : 'none';
+  document.getElementById('filesPanel').classList.toggle('show', tab === 'files');
+  if (tab === 'files') refreshFiles();
+}
+
+// ==================== FILES PANEL ====================
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function formatTime(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleString(undefined, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+
+async function refreshFiles() {
+  try {
+    const resp = await fetch(`${API}/files`);
+    const files = await resp.json();
+    const panel = document.getElementById('filesPanel');
+
+    if (!files.length) {
+      panel.innerHTML = '<div class="files-empty">No files yet</div>';
+      return;
+    }
+
+    let html = '';
+    for (const f of files) {
+      const icon = f.type === 'result' ? '&#x1F4CA;' : '&#x1F4C1;';
+      const displayName = f.type === 'result'
+        ? `${f.task_id} / ${f.filename}`
+        : (f.original_name || f.filename);
+      const badge = f.status === 'completed'
+        ? '<span class="badge completed" style="margin-left:6px">done</span>'
+        : f.status === 'processing'
+          ? '<span class="badge processing" style="margin-left:6px">running</span>'
+          : '';
+
+      html += `<div class="file-item">
+        <div class="file-icon">${icon}</div>
+        <div class="file-info">
+          <div class="file-name">${displayName}${badge}</div>
+          <div class="file-meta">${formatFileSize(f.size)} &middot; ${formatTime(f.modified)}</div>
+        </div>
+        <div class="file-actions">
+          ${f.download_url ? `<a href="${API}${f.download_url}" download title="Download">DL</a>` : ''}
+          <button class="del-btn" onclick="deleteTask('${f.task_id}')" title="Delete task">X</button>
+        </div>
+      </div>`;
+    }
+    panel.innerHTML = html;
+  } catch (e) {
+    console.error('Failed to refresh files:', e);
+  }
+}
+
+async function deleteTask(taskId) {
+  if (!confirm(`Delete task ${taskId} and all its files?`)) return;
+  try {
+    const resp = await fetch(`${API}/task/${taskId}`, {method: 'DELETE'});
+    if (resp.ok) {
+      delete taskData[taskId];
+      if (activeTaskId === taskId) {
+        activeTaskId = null;
+        document.getElementById('downloads').style.display = 'none';
+      }
+      renderTaskList();
+      refreshFiles();
+    } else {
+      const data = await resp.json();
+      alert('Delete failed: ' + (data.detail || 'Unknown error'));
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
 
 // ==================== TASK LIST ====================
 function renderTaskList() {
@@ -293,14 +565,17 @@ function renderTaskList() {
   for (const [tid, t] of Object.entries(taskData)) {
     const active = tid === activeTaskId ? 'active' : '';
     const stats = t.stats || {};
+    const status = t.status || 'unknown';
     html += `<div class="task-card ${active}" onclick="selectTask('${tid}')">
       <div class="name">${t.filename || tid}</div>
+      <button class="delete-btn" onclick="event.stopPropagation();deleteTask('${tid}')" title="Delete">X</button>
       <div class="meta">
-        <span class="badge ${t.status}">${t.status}</span>
+        <span class="badge ${status}">${status}</span>
+        ${status === 'processing' && t.step_label ? `<span>${t.step_label}</span>` : ''}
         ${stats.n_trees != null ? `<span>${stats.n_trees} trees</span>` : ''}
         ${stats.inference_time_s ? `<span>${stats.inference_time_s}s</span>` : ''}
       </div>
-      ${t.status === 'completed' ? `<div class="task-stats">
+      ${status === 'completed' ? `<div class="task-stats">
         <div>Points: <span class="val">${(stats.n_processed||0).toLocaleString()}</span></div>
         <div>Trees: <span class="val">${stats.n_trees||0}</span></div>
         ${stats.semantic ? `
@@ -537,6 +812,10 @@ setInterval(checkHealth, 15000);
 fetch(`${API}/tasks`).then(r=>r.json()).then(data=>{
   for(const [tid,t] of Object.entries(data)){
     taskData[tid] = {...t, task_id:tid};
+    // Resume polling for any still-processing tasks
+    if (t.status === 'processing') {
+      startPolling(tid);
+    }
   }
   renderTaskList();
 }).catch(()=>{});
