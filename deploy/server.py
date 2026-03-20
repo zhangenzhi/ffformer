@@ -92,7 +92,8 @@ PROGRESS_STEPS = [
     ('reading', 'Reading point cloud', 10),
     ('subsampling', 'Subsampling points', 30),
     ('inferring', 'Running inference', 50),
-    ('saving', 'Saving results', 90),
+    ('saving', 'Saving results', 88),
+    ('tiling', 'Building viewer tiles', 92),
     ('completed', 'Completed', 100),
 ]
 
@@ -200,6 +201,20 @@ def _run_inference_background(task_id, input_path, suffix, subsample, max_points
         stats_path = os.path.join(task_dir, 'stats.json')
         with open(stats_path, 'w') as f:
             json.dump(stats, f, indent=2)
+
+        # Generate octree tiles for streaming visualization
+        _log_task(task_id, t_start, "Building octree tiles for streaming viewer...")
+        _update_task_progress(task_id, 'tiling', progress=92)
+        viewer_dir = os.path.join(task_dir, 'viewer')
+        try:
+            sys.path.insert(0, PROJECT_ROOT)
+            from tools.potree_convert import build_octree
+            build_octree(output_ply, viewer_dir, node_budget=50_000, max_depth=8)
+            _log_task(task_id, t_start, "Octree tiles generated")
+            stats['has_viewer'] = True
+        except Exception as tile_err:
+            _log_task(task_id, t_start, f"Tile generation failed (non-fatal): {tile_err}")
+            stats['has_viewer'] = False
 
         # Save inference log
         log_path = os.path.join(task_dir, 'inference.log')
@@ -375,6 +390,27 @@ def list_all_files():
     # Sort newest first
     all_files.sort(key=lambda f: f['modified'], reverse=True)
     return JSONResponse(all_files)
+
+
+@app.get("/viewer/{task_id}/metadata.json")
+def viewer_metadata(task_id: str):
+    """Serve octree metadata for streaming viewer."""
+    meta_path = os.path.join(RESULTS_DIR, task_id, 'viewer', 'metadata.json')
+    if not os.path.exists(meta_path):
+        raise HTTPException(404, "Viewer tiles not available for this task")
+    return FileResponse(meta_path, media_type='application/json')
+
+
+@app.get("/viewer/{task_id}/tiles/{node_key}.bin")
+def viewer_tile(task_id: str, node_key: str):
+    """Serve a single octree tile binary."""
+    # Sanitize node_key to prevent path traversal
+    if not all(c in 'r01234567' for c in node_key):
+        raise HTTPException(400, "Invalid tile key")
+    tile_path = os.path.join(RESULTS_DIR, task_id, 'viewer', 'tiles', f'{node_key}.bin')
+    if not os.path.exists(tile_path):
+        raise HTTPException(404, "Tile not found")
+    return FileResponse(tile_path, media_type='application/octet-stream')
 
 
 @app.get("/result/{task_id}/ply")

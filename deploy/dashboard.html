@@ -691,13 +691,20 @@ async function selectTask(tid) {
   document.getElementById('infoPoints').textContent = `${(stats.n_processed||0).toLocaleString()} points`;
   document.getElementById('infoTime').textContent = `${stats.inference_time_s||'?'}s inference`;
 
-  // Load PLY for viewer
+  // Load streaming viewer (octree tiles) or fallback to PLY
   try {
-    const resp = await fetch(`${API}/result/${tid}/ply`);
-    const text = await resp.text();
-    loadPlyInViewer(text);
+    const metaResp = await fetch(`${API}/viewer/${tid}/metadata.json`);
+    if (metaResp.ok) {
+      const meta = await metaResp.json();
+      loadStreamingViewer(tid, meta);
+    } else {
+      // Fallback: load PLY text (small files only)
+      const resp = await fetch(`${API}/result/${tid}/ply`);
+      const text = await resp.text();
+      loadPlyInViewer(text);
+    }
   } catch(e) {
-    console.error('Failed to load PLY:', e);
+    console.error('Failed to load viewer:', e);
   }
 }
 
@@ -747,7 +754,12 @@ function initViewer() {
 
   // Toolbar
   document.getElementById('vPsize').oninput = function(){
-    if(pointsMat) pointsMat.size = R*0.01*(this.value/30.0);
+    const v = this.value / 30.0;
+    if(pointsMat) pointsMat.size = R*0.01*v;
+    // Also update streaming nodes
+    for (const obj of Object.values(streamNodes)) {
+      obj.material.size = Math.max(1.0, R * 0.02) * v;
+    }
   };
   document.getElementById('vBg').onchange = function(){
     scene.background = new THREE.Color(this.value);
@@ -779,8 +791,14 @@ function updateCam() {
   camera.lookAt(camTarget);
 }
 
-function animate() {
+let _lastStreamLOD = 0;
+function animate(t) {
   requestAnimationFrame(animate);
+  // Update streaming LOD every 150ms
+  if (streamMeta && t - _lastStreamLOD > 150) {
+    updateStreamLOD();
+    _lastStreamLOD = t;
+  }
   renderer.render(scene, camera);
 }
 
@@ -872,6 +890,186 @@ function recolorPoints(mode) {
   colorPoints(plyRows, col, colors, mode);
   pointsMesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors,3));
   pointsMesh.geometry.attributes.color.needsUpdate = true;
+}
+
+// ==================== STREAMING OCTREE VIEWER ====================
+let streamNodes = {};      // key -> THREE.Points
+let streamLoading = new Set();
+let streamMeta = null;
+let streamTaskId = null;
+let streamVisiblePts = 0;
+const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
+const STREAM_MAX_CONCURRENT = 8;
+const STREAM_SCREEN_THRESHOLD = 60;
+
+function clearStreamViewer() {
+  for (const key of Object.keys(streamNodes)) {
+    scene.remove(streamNodes[key]);
+    streamNodes[key].geometry.dispose();
+    streamNodes[key].material.dispose();
+  }
+  streamNodes = {};
+  streamLoading.clear();
+  streamMeta = null;
+  streamTaskId = null;
+  streamVisiblePts = 0;
+}
+
+function loadStreamingViewer(taskId, meta) {
+  clearStreamViewer();
+  if (pointsMesh) { scene.remove(pointsMesh); pointsMesh = null; }
+
+  streamMeta = meta;
+  streamTaskId = taskId;
+
+  const bMin = meta.bbox_min;
+  const bSize = meta.bbox_size;
+  const cx = bMin[0] + bSize/2, cy = bMin[1] + bSize/2, cz = bMin[2] + bSize/2;
+  R = bSize / 2;
+
+  // Reset camera to scene center
+  camTarget.set(cx, cy, cz);
+  spherical.radius = R * 2.5;
+  spherical.theta = -Math.PI/2;
+  spherical.phi = Math.PI/3;
+  updateCam();
+
+  // Show viewer
+  document.getElementById('viewerEmpty').style.display='none';
+  document.getElementById('viewer3d').style.display='block';
+  document.getElementById('viewerToolbar').style.display='block';
+  document.getElementById('infoBar').style.display='flex';
+  document.getElementById('vPsize').value=30;
+  onResize();
+
+  console.log('Streaming viewer loaded:', meta.total_points, 'points,', Object.keys(meta.nodes).length, 'nodes');
+}
+
+function getStreamNodeBBox(key) {
+  const bMin = streamMeta.bbox_min;
+  let min = [bMin[0], bMin[1], bMin[2]];
+  let size = streamMeta.bbox_size;
+  for (let i = 1; i < key.length; i++) {
+    size /= 2;
+    const c = parseInt(key[i]);
+    min[0] += (c & 1) ? size : 0;
+    min[1] += (c & 2) ? size : 0;
+    min[2] += (c & 4) ? size : 0;
+  }
+  return {min, size};
+}
+
+function streamNodeScreenSize(key) {
+  const bb = getStreamNodeBBox(key);
+  const nc = new THREE.Vector3(bb.min[0]+bb.size/2, bb.min[1]+bb.size/2, bb.min[2]+bb.size/2);
+  const dist = camera.position.distanceTo(nc);
+  if (dist < 0.001) return 99999;
+  const fov = camera.fov * Math.PI / 180;
+  return (bb.size / dist) * renderer.domElement.height / (2 * Math.tan(fov/2));
+}
+
+async function loadStreamNode(key) {
+  if (streamNodes[key] || streamLoading.has(key)) return;
+  if (!streamMeta.nodes[key]) return;
+  streamLoading.add(key);
+
+  try {
+    const resp = await fetch(`${API}/viewer/${streamTaskId}/tiles/${key}.bin`);
+    if (!resp.ok) { streamLoading.delete(key); return; }
+    const buf = await resp.arrayBuffer();
+    const arr = new Uint8Array(buf);
+    const n = arr.length / STREAM_POINT_SIZE;
+    if (n === 0) { streamLoading.delete(key); return; }
+
+    const dv = new DataView(buf);
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+
+    for (let i = 0; i < n; i++) {
+      const o = i * STREAM_POINT_SIZE;
+      positions[i*3]   = dv.getFloat32(o, true);
+      positions[i*3+1] = dv.getFloat32(o+4, true);
+      positions[i*3+2] = dv.getFloat32(o+8, true);
+      colors[i*3]   = arr[o+12] / 255;
+      colors[i*3+1] = arr[o+13] / 255;
+      colors[i*3+2] = arr[o+14] / 255;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({
+      size: Math.max(1.0, R * 0.02),
+      vertexColors: true, sizeAttenuation: true
+    });
+    const points = new THREE.Points(geo, mat);
+    points.userData = {key, count: n};
+    scene.add(points);
+    streamNodes[key] = points;
+    streamVisiblePts += n;
+  } catch(e) {
+    console.warn('Failed to load tile', key, e);
+  }
+  streamLoading.delete(key);
+}
+
+function unloadStreamNode(key) {
+  const obj = streamNodes[key];
+  if (!obj) return;
+  streamVisiblePts -= obj.userData.count;
+  scene.remove(obj);
+  obj.geometry.dispose();
+  obj.material.dispose();
+  delete streamNodes[key];
+}
+
+function updateStreamLOD() {
+  if (!streamMeta) return;
+  const nodes = streamMeta.nodes;
+  const toLoad = [];
+  const toKeep = new Set();
+
+  // BFS from root
+  const queue = ['r'];
+  while (queue.length > 0) {
+    const key = queue.shift();
+    if (!nodes[key]) continue;
+
+    const ss = streamNodeScreenSize(key);
+    const nodeInfo = nodes[key];
+
+    if (ss > STREAM_SCREEN_THRESHOLD && nodeInfo.children && nodeInfo.children.length > 0) {
+      for (const c of nodeInfo.children) queue.push(key + c);
+      toKeep.add(key);
+    } else {
+      toKeep.add(key);
+    }
+  }
+
+  // Load needed
+  for (const key of toKeep) {
+    if (!streamNodes[key] && !streamLoading.has(key)) toLoad.push(key);
+  }
+
+  // Unload unneeded
+  for (const key of Object.keys(streamNodes)) {
+    if (!toKeep.has(key)) {
+      let needed = false;
+      for (const k of toKeep) { if (k.startsWith(key)) { needed = true; break; } }
+      if (!needed) unloadStreamNode(key);
+    }
+  }
+
+  // Load with priority (largest screen size first)
+  toLoad.sort((a, b) => streamNodeScreenSize(b) - streamNodeScreenSize(a));
+  const budget = STREAM_MAX_CONCURRENT - streamLoading.size;
+  for (let i = 0; i < Math.min(budget, toLoad.length); i++) loadStreamNode(toLoad[i]);
+
+  // Update info bar
+  const loaded = Object.keys(streamNodes).length;
+  const total = Object.keys(nodes).length;
+  document.getElementById('infoPoints').textContent =
+    streamVisiblePts.toLocaleString() + ' / ' + streamMeta.total_points.toLocaleString() + ' points';
 }
 
 // ==================== MODEL MANAGEMENT ====================
