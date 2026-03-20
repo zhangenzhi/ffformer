@@ -22,6 +22,7 @@ spec:
         workload.user.cattle.io/workloadselector: apps.deployment-c30636-default-ffformer-infer
       namespace: c30636-default
     spec:
+      runtimeClassName: nvidia
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
       securityContext:
@@ -32,6 +33,15 @@ spec:
         - name: ffformer-infer
           image: zhangenzhi/forestformer3d:latest
           imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
           # API server (remove command/args to use Dockerfile CMD)
           # Or use sleep infinity for debugging:
           #   command: ["sleep"]
