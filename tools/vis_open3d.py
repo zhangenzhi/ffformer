@@ -110,31 +110,34 @@ def main():
 
     n = len(xyz)
 
-    # --- 4. Assign colors ---
+    # --- 4. Assign colors + count trees ---
     t0 = time.time()
-    colors = np.tile(UNASSIGNED, (n, 1))
+    inst = data[:, col['instance_pred']].astype(np.int32) if 'instance_pred' in col else None
+    sem = data[:, col['semantic_pred']].astype(np.int32) if 'semantic_pred' in col else None
 
-    if args.mode == 'instance' and 'instance_pred' in col:
-        inst = data[:, col['instance_pred']].astype(np.int32)
+    # Pre-allocate with unassigned color
+    colors = np.empty((n, 3), dtype=np.float64)
+    colors[:] = UNASSIGNED
+
+    if args.mode == 'instance' and inst is not None:
         valid = inst >= 0
         colors[valid] = INSTANCE_PALETTE[inst[valid] % len(INSTANCE_PALETTE)]
-        if 'semantic_pred' in col:
-            sem = data[:, col['semantic_pred']].astype(np.int32)
-            for s in range(len(SEMANTIC_COLORS)):
-                mask = (~valid) & (sem == s)
-                colors[mask] = SEMANTIC_COLORS[s]
-    elif args.mode == 'semantic' and 'semantic_pred' in col:
-        sem = data[:, col['semantic_pred']].astype(np.int32)
-        for s in range(len(SEMANTIC_COLORS)):
-            mask = sem == s
-            colors[mask] = SEMANTIC_COLORS[s]
+        if sem is not None:
+            unassigned = ~valid
+            sem_unassigned = sem[unassigned]
+            in_range = (sem_unassigned >= 0) & (sem_unassigned < len(SEMANTIC_COLORS))
+            colors_ua = colors[unassigned]
+            colors_ua[in_range] = SEMANTIC_COLORS[sem_unassigned[in_range]]
+            colors[unassigned] = colors_ua
+    elif args.mode == 'semantic' and sem is not None:
+        in_range = (sem >= 0) & (sem < len(SEMANTIC_COLORS))
+        colors[in_range] = SEMANTIC_COLORS[sem[in_range]]
+
     dt = time.time() - t0
     timings.append(('Assign colors', dt))
 
-    # --- 5. Count trees ---
     t0 = time.time()
-    n_trees = len(set(data[:, col['instance_pred']].astype(int)[
-        data[:, col['instance_pred']].astype(int) >= 0])) if 'instance_pred' in col else 0
+    n_trees = len(np.unique(inst[inst >= 0])) if inst is not None else 0
     dt = time.time() - t0
     timings.append(('Count trees', dt))
 
