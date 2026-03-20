@@ -90,7 +90,8 @@ header .dot.off { background:var(--red); }
 .sidebar-tabs button:hover { color:var(--text); }
 
 /* Task list */
-.task-list { flex:1; overflow-y:auto; padding:8px; }
+.task-list { flex:1; overflow-y:auto; padding:8px; display:none; }
+.task-list.show { display:block; }
 .task-list h3 { font-size:11px; color:var(--text2); text-transform:uppercase;
   letter-spacing:0.8px; padding:8px; }
 .task-card { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
@@ -290,7 +291,7 @@ header .dot.off { background:var(--red); }
       <button id="tabFiles" onclick="switchTab('files')">Files</button>
     </div>
 
-    <div class="task-list" id="taskList">
+    <div class="task-list show" id="taskList">
       <h3>Results</h3>
     </div>
 
@@ -561,7 +562,8 @@ function switchTab(tab) {
   document.getElementById('tabResults').classList.toggle('active', tab === 'results');
   document.getElementById('tabData').classList.toggle('active', tab === 'data');
   document.getElementById('tabFiles').classList.toggle('active', tab === 'files');
-  document.getElementById('taskList').style.display = tab === 'results' ? 'block' : 'none';
+  // Use consistent class-based visibility for all panels
+  document.getElementById('taskList').classList.toggle('show', tab === 'results');
   document.getElementById('dataPanel').classList.toggle('show', tab === 'data');
   document.getElementById('filesPanel').classList.toggle('show', tab === 'files');
   if (tab === 'files') refreshFilesGrouped();
@@ -1154,11 +1156,12 @@ async function refreshData() {
           <div class="data-name" title="${f.path}">${f.filename}</div>
           <div class="data-meta">${sizeMB} MB &middot; ${typeLabel} &middot; ${formatTime(f.modified)}</div>
         </div>
-        <button class="btn-run" onclick="runDataInference('${f.path.replace(/'/g, "\\'")}')">Run</button>
+        <button class="btn-run" data-path="${f.path.replace(/"/g, '&quot;')}" onclick="runDataInference(this.dataset.path)">Run</button>
       </div>`;
     }
     panel.innerHTML = html;
   } catch (e) {
+    console.error('Failed to load data files:', e);
     document.getElementById('dataPanel').innerHTML = '<div class="files-empty">Failed to load data files</div>';
   }
 }
@@ -1277,7 +1280,8 @@ async function refreshFilesGrouped() {
             <div class="file-meta">${formatFileSize(f.size)}</div>
           </div>
           <div class="file-actions">
-            ${f.download_url ? `<a href="${API}${f.download_url}" ${f.name.endsWith('.log') ? '' : 'download'} title="Download">DL</a>` : ''}
+            ${f.name.endsWith('.log') ? `<button onclick="viewLog('${o.task_id}')" title="View Log">Log</button>` : ''}
+            ${f.download_url ? `<a href="${API}${f.download_url}" download title="Download">DL</a>` : ''}
           </div>
         </div>`;
       }
@@ -1285,7 +1289,7 @@ async function refreshFilesGrouped() {
     }
     panel.innerHTML = html;
   } catch (e) {
-    // Fall back to original file listing
+    console.error('Failed to load outputs, falling back:', e);
     refreshFiles();
   }
 }
