@@ -62,34 +62,43 @@ def main():
                 break
 
     col = {name: idx for idx, name in enumerate(fields)}
-    print(f'Loading {args.input} ({num_vertices:,} points) ...')
+    print(f'Loading {args.input} ({num_vertices:,} points)')
+    print()
+    timings = []
+    t_total = time.time()
 
-    # Load with numpy
+    # --- 1. Parse PLY ---
     t0 = time.time()
     data = np.loadtxt(args.input, skiprows=header_lines, max_rows=num_vertices)
-    print(f'  Parsed in {time.time() - t0:.1f}s')
+    dt = time.time() - t0
+    timings.append(('Parse PLY', dt))
 
+    # --- 2. Extract XYZ ---
+    t0 = time.time()
     xyz = np.ascontiguousarray(data[:, [col['x'], col['y'], col['z']]]).astype(np.float64)
+    dt = time.time() - t0
+    timings.append(('Extract XYZ', dt))
 
-    # Downsample if needed
+    # --- 3. Downsample ---
+    t0 = time.time()
     if args.max_points > 0 and len(xyz) > args.max_points:
-        print(f'  Downsampling {len(xyz):,} -> {args.max_points:,} ...')
         idx = np.random.choice(len(xyz), args.max_points, replace=False)
         idx.sort()
         xyz = xyz[idx]
         data = data[idx]
+    dt = time.time() - t0
+    timings.append(('Downsample', dt))
 
     n = len(xyz)
-    print(f'  Visualizing {n:,} points, mode={args.mode}')
 
-    # Assign colors
+    # --- 4. Assign colors ---
+    t0 = time.time()
     colors = np.tile(UNASSIGNED, (n, 1))
 
     if args.mode == 'instance' and 'instance_pred' in col:
         inst = data[:, col['instance_pred']].astype(np.int32)
         valid = inst >= 0
         colors[valid] = INSTANCE_PALETTE[inst[valid] % len(INSTANCE_PALETTE)]
-        # Unassigned: use semantic
         if 'semantic_pred' in col:
             sem = data[:, col['semantic_pred']].astype(np.int32)
             for s in range(len(SEMANTIC_COLORS)):
@@ -100,22 +109,47 @@ def main():
         for s in range(len(SEMANTIC_COLORS)):
             mask = sem == s
             colors[mask] = SEMANTIC_COLORS[s]
+    dt = time.time() - t0
+    timings.append(('Assign colors', dt))
 
-    # Build PyVista point cloud
-    cloud = pv.PolyData(xyz)
-    cloud['rgb'] = (colors * 255).astype(np.uint8)
-
+    # --- 5. Count trees ---
+    t0 = time.time()
     n_trees = len(set(data[:, col['instance_pred']].astype(int)[
         data[:, col['instance_pred']].astype(int) >= 0])) if 'instance_pred' in col else 0
-    print(f'  Trees: {n_trees}')
-    print('  Controls: mouse drag=rotate, scroll=zoom, right-drag=pan')
+    dt = time.time() - t0
+    timings.append(('Count trees', dt))
 
-    # Visualize
+    # --- 6. Build PyVista cloud ---
+    t0 = time.time()
+    cloud = pv.PolyData(xyz)
+    cloud['rgb'] = (colors * 255).astype(np.uint8)
+    dt = time.time() - t0
+    timings.append(('Build PolyData', dt))
+
+    # --- 7. Render ---
+    t0 = time.time()
     pl = pv.Plotter(window_size=[1280, 800],
                      title=f'ForestFormer3D — {n:,} points, {n_trees} trees ({args.mode})')
     pl.set_background('#0d1117')
     pl.add_points(cloud, scalars='rgb', rgb=True, point_size=2.0,
                   render_points_as_spheres=False)
+    dt = time.time() - t0
+    timings.append(('Init renderer', dt))
+
+    # --- Print timing summary ---
+    dt_total = time.time() - t_total
+    print(f'  {n:,} points, {n_trees} trees, mode={args.mode}')
+    print()
+    print(f'  {"Step":<20} {"Time":>8} {"Pct":>6}')
+    print(f'  {"-"*20} {"-"*8} {"-"*6}')
+    for name, dt in timings:
+        pct = dt / dt_total * 100
+        print(f'  {name:<20} {dt:>7.1f}s {pct:>5.1f}%')
+    print(f'  {"-"*20} {"-"*8} {"-"*6}')
+    print(f'  {"Total":<20} {dt_total:>7.1f}s {100.0:>5.1f}%')
+    print()
+    print('  Controls: mouse drag=rotate, scroll=zoom, right-drag=pan')
+
     pl.show()
 
 
