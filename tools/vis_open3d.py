@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Visualize ForestFormer3D PLY with Open3D, colored by instance/semantic.
+"""Visualize ForestFormer3D PLY with PyVista, colored by instance/semantic.
+
+Works on Mac Apple Silicon, Linux, and Windows.
 
 Usage:
     python tools/vis_open3d.py work_dirs/jpeaks_area1/jpeaks_area1_test.ply
@@ -13,9 +15,9 @@ import time
 import numpy as np
 
 try:
-    import open3d as o3d
+    import pyvista as pv
 except ImportError:
-    print("pip install open3d")
+    print("pip install pyvista")
     sys.exit(1)
 
 INSTANCE_PALETTE = np.array([
@@ -99,24 +101,22 @@ def main():
             mask = sem == s
             colors[mask] = SEMANTIC_COLORS[s]
 
-    # Build Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(xyz)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
+    # Build PyVista point cloud
+    cloud = pv.PolyData(xyz)
+    cloud['rgb'] = (colors * 255).astype(np.uint8)
 
-    # Visualize
     n_trees = len(set(data[:, col['instance_pred']].astype(int)[
         data[:, col['instance_pred']].astype(int) >= 0])) if 'instance_pred' in col else 0
     print(f'  Trees: {n_trees}')
-    print('  Controls: mouse drag=rotate, scroll=zoom, shift+drag=pan')
+    print('  Controls: mouse drag=rotate, scroll=zoom, right-drag=pan')
 
-    o3d.visualization.draw_geometries(
-        [pcd],
-        window_name=f'ForestFormer3D — {n:,} points, {n_trees} trees ({args.mode})',
-        width=1280,
-        height=800,
-        point_show_normal=False,
-    )
+    # Visualize
+    pl = pv.Plotter(window_size=[1280, 800],
+                     title=f'ForestFormer3D — {n:,} points, {n_trees} trees ({args.mode})')
+    pl.set_background('#0d1117')
+    pl.add_points(cloud, scalars='rgb', rgb=True, point_size=2.0,
+                  render_points_as_spheres=False)
+    pl.show()
 
 
 if __name__ == '__main__':
