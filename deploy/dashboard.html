@@ -166,6 +166,63 @@ header .dot.off { background:var(--red); }
 .btn-secondary { background:var(--bg3); color:var(--text); border:1px solid var(--border); }
 .btn-secondary:hover { border-color:var(--accent); color:var(--accent); }
 
+/* Config panel */
+.config-panel { padding:12px 16px; border-bottom:1px solid var(--border); }
+.config-panel h4 { font-size:10px; color:var(--text2); text-transform:uppercase;
+  letter-spacing:0.6px; margin-bottom:8px; }
+.config-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.config-row select { flex:1; background:var(--bg); color:var(--text);
+  border:1px solid var(--border); border-radius:4px; padding:4px 6px; font-size:11px; }
+.config-row select:focus { border-color:var(--accent); outline:none; }
+.config-row .btn-sm { padding:4px 10px; border:1px solid var(--border); border-radius:4px;
+  background:var(--bg3); color:var(--text); font-size:10px; font-weight:600;
+  cursor:pointer; transition:all 0.15s; white-space:nowrap; }
+.config-row .btn-sm:hover { border-color:var(--accent); color:var(--accent); }
+.config-meta { font-size:10px; color:var(--text2); }
+
+/* Data browser panel */
+.data-panel { flex:1; overflow-y:auto; padding:8px; display:none; }
+.data-panel.show { display:block; }
+.data-item { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+  padding:10px 12px; margin-bottom:6px; display:flex; align-items:center; gap:10px; }
+.data-item .data-icon { font-size:16px; flex-shrink:0; }
+.data-item .data-info { flex:1; min-width:0; }
+.data-item .data-name { font-size:12px; font-weight:600; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.data-item .data-meta { font-size:10px; color:var(--text2); margin-top:2px; }
+.data-item .btn-run { padding:3px 10px; border:1px solid var(--green); border-radius:4px;
+  background:rgba(63,185,80,0.1); color:var(--green); font-size:10px; font-weight:600;
+  cursor:pointer; transition:all 0.15s; flex-shrink:0; }
+.data-item .btn-run:hover { background:var(--green); color:#fff; }
+
+/* Log viewer modal */
+.log-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100;
+  display:flex; align-items:center; justify-content:center; }
+.log-overlay.hidden { display:none; }
+.log-modal { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+  width:560px; max-width:90vw; max-height:70vh; display:flex; flex-direction:column; }
+.log-modal-header { display:flex; align-items:center; justify-content:space-between;
+  padding:12px 16px; border-bottom:1px solid var(--border); }
+.log-modal-header h3 { font-size:13px; color:var(--text); }
+.log-modal-header .close-btn { background:none; border:none; color:var(--text2);
+  font-size:18px; cursor:pointer; padding:2px 6px; border-radius:4px; }
+.log-modal-header .close-btn:hover { color:var(--text); background:var(--bg3); }
+.log-content { flex:1; overflow-y:auto; padding:12px 16px; background:#0a0e14;
+  font-family:'Cascadia Code','Fira Code','Consolas',monospace; font-size:12px;
+  line-height:1.7; color:#a0c4a8; white-space:pre-wrap; word-break:break-all; }
+
+/* View Log button */
+.btn-log { padding:2px 8px; border:1px solid var(--border); border-radius:4px;
+  background:var(--bg3); color:var(--text2); font-size:10px; cursor:pointer;
+  transition:all 0.15s; margin-left:6px; }
+.btn-log:hover { border-color:var(--accent); color:var(--accent); }
+
+/* Outputs grouping in files panel */
+.output-group { margin-bottom:12px; }
+.output-group-header { font-size:11px; color:var(--text2); padding:6px 8px;
+  display:flex; align-items:center; gap:8px; }
+.output-group-header .val { color:var(--text); font-weight:600; }
+
 /* Scrollbar */
 ::-webkit-scrollbar { width:6px; }
 ::-webkit-scrollbar-track { background:var(--bg2); }
@@ -186,6 +243,14 @@ header .dot.off { background:var(--red); }
 <div class="main">
   <!-- Sidebar -->
   <div class="sidebar">
+    <div class="config-panel">
+      <h4>Model</h4>
+      <div class="config-row">
+        <select id="modelSelect"><option value="">Loading...</option></select>
+        <button class="btn-sm" id="modelChangeBtn" onclick="switchModel()">Change</button>
+      </div>
+      <div class="config-meta" id="modelMeta"></div>
+    </div>
     <div class="upload-zone">
       <div class="drop-area" id="dropArea">
         <div class="icon">&#x1F332;</div>
@@ -221,11 +286,16 @@ header .dot.off { background:var(--red); }
 
     <div class="sidebar-tabs">
       <button class="active" id="tabResults" onclick="switchTab('results')">Results</button>
+      <button id="tabData" onclick="switchTab('data')">Data</button>
       <button id="tabFiles" onclick="switchTab('files')">Files</button>
     </div>
 
     <div class="task-list" id="taskList">
       <h3>Results</h3>
+    </div>
+
+    <div class="data-panel" id="dataPanel">
+      <div class="files-empty">Scanning for data files...</div>
     </div>
 
     <div class="files-panel" id="filesPanel">
@@ -269,6 +339,17 @@ header .dot.off { background:var(--red); }
       <span class="sep">|</span>
       <span id="infoTime"></span>
     </div>
+  </div>
+</div>
+
+<!-- Log Viewer Modal -->
+<div class="log-overlay hidden" id="logOverlay" onclick="if(event.target===this)closeLog()">
+  <div class="log-modal">
+    <div class="log-modal-header">
+      <h3 id="logTitle">Inference Log</h3>
+      <button class="close-btn" onclick="closeLog()">X</button>
+    </div>
+    <div class="log-content" id="logContent">No log available.</div>
   </div>
 </div>
 
@@ -478,10 +559,13 @@ uploadBtn.addEventListener('click', async () => {
 function switchTab(tab) {
   currentTab = tab;
   document.getElementById('tabResults').classList.toggle('active', tab === 'results');
+  document.getElementById('tabData').classList.toggle('active', tab === 'data');
   document.getElementById('tabFiles').classList.toggle('active', tab === 'files');
   document.getElementById('taskList').style.display = tab === 'results' ? 'block' : 'none';
+  document.getElementById('dataPanel').classList.toggle('show', tab === 'data');
   document.getElementById('filesPanel').classList.toggle('show', tab === 'files');
-  if (tab === 'files') refreshFiles();
+  if (tab === 'files') refreshFilesGrouped();
+  if (tab === 'data') refreshData();
 }
 
 // ==================== FILES PANEL ====================
@@ -574,6 +658,7 @@ function renderTaskList() {
         ${status === 'processing' && t.step_label ? `<span>${t.step_label}</span>` : ''}
         ${stats.n_trees != null ? `<span>${stats.n_trees} trees</span>` : ''}
         ${stats.inference_time_s ? `<span>${stats.inference_time_s}s</span>` : ''}
+        ${status === 'completed' || status === 'failed' ? `<button class="btn-log" onclick="event.stopPropagation();viewLog('${tid}')">View Log</button>` : ''}
       </div>
       ${status === 'completed' ? `<div class="task-stats">
         <div>Points: <span class="val">${(stats.n_processed||0).toLocaleString()}</span></div>
@@ -789,6 +874,224 @@ function recolorPoints(mode) {
   pointsMesh.geometry.attributes.color.needsUpdate = true;
 }
 
+// ==================== MODEL MANAGEMENT ====================
+async function loadModels() {
+  try {
+    const resp = await fetch(`${API}/models`);
+    const models = await resp.json();
+    const sel = document.getElementById('modelSelect');
+    if (!models.length) {
+      sel.innerHTML = '<option value="">No models found</option>';
+      document.getElementById('modelMeta').textContent = '';
+      return;
+    }
+    sel.innerHTML = '';
+    let currentModel = null;
+    for (const m of models) {
+      const opt = document.createElement('option');
+      opt.value = m.path;
+      const sizeMB = (m.size / 1048576).toFixed(1);
+      opt.textContent = `${m.filename} (${sizeMB} MB)`;
+      if (m.current) {
+        opt.selected = true;
+        currentModel = m;
+      }
+      sel.appendChild(opt);
+    }
+    updateModelMeta();
+    sel.addEventListener('change', updateModelMeta);
+  } catch (e) {
+    document.getElementById('modelSelect').innerHTML = '<option value="">Failed to load</option>';
+  }
+}
+
+function updateModelMeta() {
+  const sel = document.getElementById('modelSelect');
+  const path = sel.value;
+  document.getElementById('modelMeta').textContent = path ? path : '';
+}
+
+async function switchModel() {
+  const sel = document.getElementById('modelSelect');
+  const path = sel.value;
+  if (!path) return;
+  try {
+    const resp = await fetch(`${API}/config/model`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: path}),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      document.getElementById('modelMeta').textContent = 'Switched: ' + path;
+      // Reload models to update current marker
+      loadModels();
+    } else {
+      alert('Failed to switch model: ' + (data.detail || JSON.stringify(data)));
+    }
+  } catch (e) {
+    alert('Failed to switch model: ' + e.message);
+  }
+}
+
+// ==================== DATA BROWSER ====================
+async function refreshData() {
+  try {
+    const resp = await fetch(`${API}/data`);
+    const files = await resp.json();
+    const panel = document.getElementById('dataPanel');
+
+    if (!files.length) {
+      panel.innerHTML = '<div class="files-empty">No LiDAR data files found on server</div>';
+      return;
+    }
+
+    let html = '';
+    for (const f of files) {
+      const sizeMB = (f.size / 1048576).toFixed(1);
+      const typeLabel = f.type.toUpperCase();
+      html += `<div class="data-item">
+        <div class="data-icon">&#x1F4E1;</div>
+        <div class="data-info">
+          <div class="data-name" title="${f.path}">${f.filename}</div>
+          <div class="data-meta">${sizeMB} MB &middot; ${typeLabel} &middot; ${formatTime(f.modified)}</div>
+        </div>
+        <button class="btn-run" onclick="runDataInference('${f.path.replace(/'/g, "\\'")}')">Run</button>
+      </div>`;
+    }
+    panel.innerHTML = html;
+  } catch (e) {
+    document.getElementById('dataPanel').innerHTML = '<div class="files-empty">Failed to load data files</div>';
+  }
+}
+
+async function runDataInference(dataPath) {
+  const sub = document.getElementById('paramSubsample').value;
+  const maxp = document.getElementById('paramMaxPts').value;
+
+  // Show progress
+  progressContainer.classList.add('show');
+  progressBar.style.width = '0%';
+  progressBar.classList.remove('indeterminate');
+  progressLabel.textContent = 'Starting...';
+  progressElapsed.textContent = '0.0s';
+  ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'].forEach(id => {
+    document.getElementById(id).classList.remove('done', 'active');
+  });
+  uploadBtn.disabled = true;
+
+  try {
+    const resp = await fetch(`${API}/predict/data`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({data_path: dataPath, subsample: parseFloat(sub), max_points: parseInt(maxp)}),
+    });
+    const data = await resp.json();
+
+    if (resp.ok) {
+      const taskId = data.task_id;
+      taskData[taskId] = {
+        task_id: taskId,
+        status: 'processing',
+        filename: data.filename || dataPath.split('/').pop(),
+        step: 'reading',
+        step_label: 'Reading point cloud',
+        progress: 10,
+      };
+      progressContainer.dataset.taskId = taskId;
+      switchTab('results');
+      renderTaskList();
+      startPolling(taskId);
+    } else {
+      progressContainer.classList.remove('show');
+      uploadBtn.disabled = false;
+      alert('Error: ' + (data.detail || JSON.stringify(data)));
+    }
+  } catch (e) {
+    progressContainer.classList.remove('show');
+    uploadBtn.disabled = false;
+    alert('Request failed: ' + e.message);
+  }
+}
+
+// ==================== LOG VIEWER ====================
+async function viewLog(taskId) {
+  const overlay = document.getElementById('logOverlay');
+  const content = document.getElementById('logContent');
+  const title = document.getElementById('logTitle');
+
+  title.textContent = `Inference Log - ${taskId}`;
+  content.textContent = 'Loading...';
+  overlay.classList.remove('hidden');
+
+  try {
+    const resp = await fetch(`${API}/task/${taskId}/log`);
+    if (resp.ok) {
+      content.textContent = await resp.text();
+    } else {
+      content.textContent = 'No log available for this task.';
+    }
+    // Auto-scroll to bottom
+    content.scrollTop = content.scrollHeight;
+  } catch (e) {
+    content.textContent = 'Failed to load log: ' + e.message;
+  }
+}
+
+function closeLog() {
+  document.getElementById('logOverlay').classList.add('hidden');
+}
+
+// ==================== OUTPUTS (enhanced files) ====================
+async function refreshFilesGrouped() {
+  try {
+    const resp = await fetch(`${API}/outputs`);
+    const outputs = await resp.json();
+    const panel = document.getElementById('filesPanel');
+
+    if (!outputs.length) {
+      panel.innerHTML = '<div class="files-empty">No output files yet</div>';
+      return;
+    }
+
+    let html = '';
+    for (const o of outputs) {
+      const badge = o.status === 'completed'
+        ? '<span class="badge completed">done</span>'
+        : o.status === 'processing'
+          ? '<span class="badge processing">running</span>'
+          : '<span class="badge failed">failed</span>';
+      const statsStr = o.stats && o.stats.n_trees != null
+        ? ` &middot; ${o.stats.n_trees} trees &middot; ${(o.stats.n_processed||0).toLocaleString()} pts`
+        : '';
+
+      html += `<div class="output-group">
+        <div class="output-group-header">
+          <span class="val">${o.filename || o.task_id}</span> ${badge}${statsStr}
+        </div>`;
+
+      for (const f of o.files) {
+        const icon = f.name.startsWith('result') ? '&#x1F4CA;' : f.name.endsWith('.log') ? '&#x1F4DD;' : '&#x1F4C1;';
+        html += `<div class="file-item">
+          <div class="file-icon">${icon}</div>
+          <div class="file-info">
+            <div class="file-name">${o.task_id} / ${f.name}</div>
+            <div class="file-meta">${formatFileSize(f.size)}</div>
+          </div>
+          <div class="file-actions">
+            ${f.download_url ? `<a href="${API}${f.download_url}" ${f.name.endsWith('.log') ? '' : 'download'} title="Download">DL</a>` : ''}
+          </div>
+        </div>`;
+      }
+      html += '</div>';
+    }
+    panel.innerHTML = html;
+  } catch (e) {
+    // Fall back to original file listing
+    refreshFiles();
+  }
+}
+
 // ==================== HEALTH CHECK ====================
 async function checkHealth() {
   try {
@@ -806,6 +1109,7 @@ async function checkHealth() {
 // ==================== INIT ====================
 initViewer();
 checkHealth();
+loadModels();
 setInterval(checkHealth, 15000);
 
 // Load existing tasks

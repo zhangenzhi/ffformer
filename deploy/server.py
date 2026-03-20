@@ -114,11 +114,22 @@ def _update_task_progress(task_id, step, progress=None, **extra):
     tasks[task_id].update(extra)
 
 
+def _log_task(task_id, t_start, message):
+    """Append a timestamped log message to the task's log list."""
+    elapsed = round(time.time() - t_start, 1)
+    entry = f"[{elapsed}s] {message}"
+    if task_id in tasks:
+        tasks[task_id].setdefault('log', []).append(entry)
+
+
 def _run_inference_background(task_id, input_path, suffix, subsample, max_points):
     """Run the full inference pipeline in a background thread."""
+    t_start = time.time()
+    tasks[task_id].setdefault('log', [])
     try:
         # Read point cloud
         _update_task_progress(task_id, 'reading')
+        _log_task(task_id, t_start, "Reading point cloud...")
         if suffix in ('.las', '.laz'):
             import laspy
             las = laspy.read(input_path)
@@ -131,22 +142,27 @@ def _run_inference_background(task_id, input_path, suffix, subsample, max_points
             xyz = _read_ply_xyz(input_path)
 
         n_original = len(xyz)
+        _log_task(task_id, t_start, f"{n_original:,} points loaded")
 
         # Subsample
         _update_task_progress(task_id, 'subsampling', progress=30)
         if subsample > 0:
+            _log_task(task_id, t_start, f"Subsampling with voxel size {subsample}m...")
             voxel_ids = np.floor(xyz / subsample).astype(np.int64)
             _, idx = np.unique(voxel_ids, axis=0, return_index=True)
             xyz = xyz[idx]
 
         if max_points > 0 and len(xyz) > max_points:
+            _log_task(task_id, t_start, f"Subsampling to {max_points:,}...")
             idx = np.random.choice(len(xyz), max_points, replace=False)
             xyz = xyz[idx]
 
         n_processed = len(xyz)
+        _log_task(task_id, t_start, f"{n_processed:,} points after subsampling")
 
         # Inference
         _update_task_progress(task_id, 'inferring', progress=50)
+        _log_task(task_id, t_start, "Running inference...")
         task_dir = os.path.dirname(input_path)
         output_ply = os.path.join(task_dir, 'result.ply')
         engine = get_engine()
@@ -176,10 +192,18 @@ def _run_inference_background(task_id, input_path, suffix, subsample, max_points
             stats['n_trees'] = n_trees
             stats['n_assigned'] = int((inst >= 0).sum())
 
+        _log_task(task_id, t_start, f"Inference complete, {stats.get('n_trees', 0)} trees found")
+        _log_task(task_id, t_start, "Saving results...")
+
         # Save stats JSON
         stats_path = os.path.join(task_dir, 'stats.json')
         with open(stats_path, 'w') as f:
             json.dump(stats, f, indent=2)
+
+        # Save inference log
+        log_path = os.path.join(task_dir, 'inference.log')
+        with open(log_path, 'w') as f:
+            f.write('\n'.join(tasks[task_id].get('log', [])) + '\n')
 
         _update_task_progress(
             task_id, 'completed', progress=100,
@@ -189,6 +213,15 @@ def _run_inference_background(task_id, input_path, suffix, subsample, max_points
         )
 
     except Exception as e:
+        _log_task(task_id, t_start, f"ERROR: {str(e)}")
+        # Save log even on failure
+        task_dir = os.path.dirname(input_path)
+        log_path = os.path.join(task_dir, 'inference.log')
+        try:
+            with open(log_path, 'w') as f:
+                f.write('\n'.join(tasks[task_id].get('log', [])) + '\n')
+        except Exception:
+            pass
         _update_task_progress(task_id, 'failed', progress=0, error=str(e))
 
 
@@ -379,9 +412,236 @@ def list_tasks():
     for tid, t in tasks.items():
         result[tid] = {
             k: v for k, v in t.items()
-            if k not in ('result_ply',)
+            if k not in ('result_ply', 'log')
         }
     return result
+
+
+# --- Model management endpoints ---
+
+@app.get("/models")
+def list_models():
+    """Scan for available model checkpoints (.pth files)."""
+    current_ckpt = os.environ.get('CHECKPOINT_PATH', '')
+    scan_dirs = ['/workspace/data/', '/weights/', '/app/work_dirs/']
+    # Also scan the directory containing the current checkpoint
+    if current_ckpt:
+        ckpt_dir = os.path.dirname(current_ckpt)
+        if ckpt_dir and ckpt_dir not in scan_dirs:
+            scan_dirs.append(ckpt_dir)
+
+    models = []
+    seen = set()
+    for d in scan_dirs:
+        if not os.path.isdir(d):
+            continue
+        for root, dirs, files in os.walk(d):
+            for fname in files:
+                if fname.endswith('.pth'):
+                    fpath = os.path.join(root, fname)
+                    if fpath in seen:
+                        continue
+                    seen.add(fpath)
+                    try:
+                        stat = os.stat(fpath)
+                        models.append({
+                            'path': fpath,
+                            'filename': fname,
+                            'size': stat.st_size,
+                            'modified': stat.st_mtime,
+                            'current': (fpath == current_ckpt),
+                        })
+                    except OSError:
+                        pass
+
+    models.sort(key=lambda m: m['modified'], reverse=True)
+    return JSONResponse(models)
+
+
+from pydantic import BaseModel as _BaseModel
+
+class _ModelSwitchRequest(_BaseModel):
+    path: str
+
+@app.post("/config/model")
+def switch_model_endpoint(req: _ModelSwitchRequest):
+    """Switch the active model checkpoint.
+
+    JSON body: {path: "/workspace/data/epoch_3000_fix.pth"}
+    """
+    global _engine
+    new_path = req.path
+    if not os.path.isfile(new_path):
+        raise HTTPException(404, f"Checkpoint not found: {new_path}")
+    if not new_path.endswith('.pth'):
+        raise HTTPException(400, "Path must point to a .pth file")
+    os.environ['CHECKPOINT_PATH'] = new_path
+    _engine = None  # Reset so next predict reloads with new checkpoint
+    return JSONResponse({
+        'status': 'ok',
+        'checkpoint': new_path,
+        'message': 'Model will be loaded on next inference request.',
+    })
+
+
+@app.get("/data")
+def list_data():
+    """List available LiDAR data files on the server."""
+    scan_dir = '/workspace/data/'
+    data_files = []
+    valid_ext = {'.las', '.laz', '.ply'}
+    if os.path.isdir(scan_dir):
+        for root, dirs, files in os.walk(scan_dir):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in valid_ext:
+                    fpath = os.path.join(root, fname)
+                    try:
+                        stat = os.stat(fpath)
+                        data_files.append({
+                            'path': fpath,
+                            'filename': fname,
+                            'size': stat.st_size,
+                            'modified': stat.st_mtime,
+                            'type': ext.lstrip('.'),
+                        })
+                    except OSError:
+                        pass
+    data_files.sort(key=lambda f: f['modified'], reverse=True)
+    return JSONResponse(data_files)
+
+
+@app.get("/outputs")
+def list_outputs():
+    """List existing inference output directories."""
+    outputs = []
+    if not os.path.isdir(RESULTS_DIR):
+        return JSONResponse(outputs)
+
+    for tid in os.listdir(RESULTS_DIR):
+        task_dir = os.path.join(RESULTS_DIR, tid)
+        if not os.path.isdir(task_dir):
+            continue
+
+        # Determine status from task tracking or files on disk
+        task_info = tasks.get(tid, {})
+        status = task_info.get('status', 'unknown')
+        if status == 'unknown':
+            if os.path.isfile(os.path.join(task_dir, 'result.ply')):
+                status = 'completed'
+
+        # Gather stats
+        stats = task_info.get('stats', {})
+        stats_file = os.path.join(task_dir, 'stats.json')
+        if not stats and os.path.isfile(stats_file):
+            try:
+                with open(stats_file, 'r') as f:
+                    stats = json.load(f)
+            except Exception:
+                pass
+
+        # List files in directory
+        dir_files = []
+        for fname in os.listdir(task_dir):
+            fpath = os.path.join(task_dir, fname)
+            if os.path.isfile(fpath):
+                fstat = os.stat(fpath)
+                download_url = None
+                if fname == 'result.ply':
+                    download_url = f'/result/{tid}/ply'
+                elif fname == 'stats.json':
+                    download_url = f'/result/{tid}/json'
+                elif fname == 'inference.log':
+                    download_url = f'/task/{tid}/log'
+                dir_files.append({
+                    'name': fname,
+                    'size': fstat.st_size,
+                    'download_url': download_url,
+                })
+
+        outputs.append({
+            'task_id': tid,
+            'filename': task_info.get('filename', tid),
+            'status': status,
+            'stats': stats,
+            'files': dir_files,
+        })
+
+    outputs.sort(key=lambda o: tasks.get(o['task_id'], {}).get('created', 0), reverse=True)
+    return JSONResponse(outputs)
+
+
+@app.get("/task/{task_id}/log")
+def task_log(task_id: str):
+    """Get the inference log for a task."""
+    # First try in-memory log
+    if task_id in tasks and tasks[task_id].get('log'):
+        return PlainTextResponse('\n'.join(tasks[task_id]['log']))
+
+    # Fall back to log file on disk
+    log_path = os.path.join(RESULTS_DIR, task_id, 'inference.log')
+    if os.path.isfile(log_path):
+        with open(log_path, 'r') as f:
+            return PlainTextResponse(f.read())
+
+    raise HTTPException(404, "Log not found for this task")
+
+
+class _DataInferenceRequest(_BaseModel):
+    data_path: str
+    subsample: float = 0.05
+    max_points: int = 500000
+
+@app.post("/predict/data")
+def predict_data(req: _DataInferenceRequest):
+    """Start inference on a server-side data file (no upload needed).
+
+    JSON body: {data_path: "/workspace/data/scan.las", subsample: 0.05, max_points: 500000}
+    """
+    data_path = req.data_path
+    if not os.path.isfile(data_path):
+        raise HTTPException(404, f"Data file not found: {data_path}")
+
+    suffix = os.path.splitext(data_path)[1].lower()
+    if suffix not in ('.las', '.laz', '.ply'):
+        raise HTTPException(400, f"Unsupported format: {suffix}. Use .las, .laz, or .ply")
+
+    task_id = str(uuid.uuid4())[:8]
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    # Symlink or copy to task dir
+    input_path = os.path.join(task_dir, f'input{suffix}')
+    try:
+        os.symlink(data_path, input_path)
+    except OSError:
+        shutil.copy2(data_path, input_path)
+
+    filename = os.path.basename(data_path)
+    tasks[task_id] = {
+        'status': 'processing',
+        'step': 'reading',
+        'step_label': 'Reading point cloud',
+        'progress': 10,
+        'filename': filename,
+        'source_path': data_path,
+        'created': time.time(),
+        'updated': time.time(),
+    }
+
+    thread = threading.Thread(
+        target=_run_inference_background,
+        args=(task_id, input_path, suffix, req.subsample, req.max_points),
+        daemon=True,
+    )
+    thread.start()
+
+    return JSONResponse({
+        'task_id': task_id,
+        'status': 'processing',
+        'filename': filename,
+        'status_url': f'/task/{task_id}/status',
+    })
 
 
 def _read_ply_xyz(path):
