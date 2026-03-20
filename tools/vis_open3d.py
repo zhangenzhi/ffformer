@@ -69,7 +69,13 @@ def main():
 
     # --- 1. Parse PLY ---
     t0 = time.time()
-    data = np.loadtxt(args.input, skiprows=header_lines, max_rows=num_vertices)
+    try:
+        import pandas as pd
+        data = pd.read_csv(args.input, sep=r'\s+', header=None,
+                           skiprows=header_lines, nrows=num_vertices,
+                           dtype=np.float64, engine='c').values
+    except ImportError:
+        data = np.loadtxt(args.input, skiprows=header_lines, max_rows=num_vertices)
     dt = time.time() - t0
     timings.append(('Parse PLY', dt))
 
