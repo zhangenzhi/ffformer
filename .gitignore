@@ -44,8 +44,8 @@ work_dirs/
 *.log
 tensorboard_logs/
 
-# Visualization outputs
-*.html
+# Visualization outputs (only in work_dirs)
+work_dirs/**/*.html
 
 # Singularity / container images
 *.sif
