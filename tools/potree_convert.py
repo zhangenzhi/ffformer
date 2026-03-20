@@ -97,7 +97,7 @@ def _process_chunk(data, col):
     if data.ndim == 1:
         data = data.reshape(1, -1)
 
-    xyz = data[:, [col['x'], col['y'], col['z']]].astype(np.float32)
+    xyz = np.ascontiguousarray(data[:, [col['x'], col['y'], col['z']]]).astype(np.float32)
 
     n = len(data)
     colors = np.tile(UNASSIGNED_COLOR, (n, 1))
