@@ -53,7 +53,8 @@ app.add_middleware(
 )
 
 # --- Global state ---
-RESULTS_DIR = os.environ.get('RESULTS_DIR', '/tmp/ffformer_results')
+WORK_DIR = os.environ.get('WORK_DIR', os.path.join(PROJECT_ROOT, 'work_dirs'))
+RESULTS_DIR = os.environ.get('RESULTS_DIR', os.path.join(WORK_DIR, 'results'))
 DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -423,7 +424,7 @@ def list_tasks():
 def list_models():
     """Scan for available model checkpoints (.pth files)."""
     current_ckpt = os.environ.get('CHECKPOINT_PATH', '')
-    scan_dirs = ['/workspace/data/', '/weights/', '/app/work_dirs/']
+    scan_dirs = [WORK_DIR, '/workspace/data/', '/weights/']
     # Also scan the directory containing the current checkpoint
     if current_ckpt:
         ckpt_dir = os.path.dirname(current_ckpt)
@@ -487,15 +488,21 @@ def switch_model_endpoint(req: _ModelSwitchRequest):
 @app.get("/data")
 def list_data():
     """List available LiDAR data files on the server."""
-    scan_dir = '/workspace/data/'
+    scan_dirs = [WORK_DIR, '/workspace/data/']
     data_files = []
+    seen = set()
     valid_ext = {'.las', '.laz', '.ply'}
-    if os.path.isdir(scan_dir):
+    for scan_dir in scan_dirs:
+        if not os.path.isdir(scan_dir):
+            continue
         for root, dirs, files in os.walk(scan_dir):
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in valid_ext:
                     fpath = os.path.join(root, fname)
+                    if fpath in seen:
+                        continue
+                    seen.add(fpath)
                     try:
                         stat = os.stat(fpath)
                         data_files.append({
