@@ -141,20 +141,61 @@ def main():
     dt = time.time() - t0
     timings.append(('Count trees', dt))
 
-    # --- 6. Build PyVista cloud ---
+    # --- 6. Build PyVista clouds (full + LOD for interaction) ---
     t0 = time.time()
-    cloud = pv.PolyData(xyz)
-    cloud['rgb'] = (colors * 255).astype(np.uint8)
+    rgb = (colors * 255).astype(np.uint8)
+
+    cloud_full = pv.PolyData(xyz)
+    cloud_full['rgb'] = rgb
+
+    # LOD: 2M point subsample for smooth interaction
+    lod_n = min(2_000_000, n)
+    if n > lod_n:
+        lod_idx = np.random.choice(n, lod_n, replace=False)
+        lod_idx.sort()
+        cloud_lod = pv.PolyData(xyz[lod_idx])
+        cloud_lod['rgb'] = rgb[lod_idx]
+    else:
+        cloud_lod = cloud_full
+
     dt = time.time() - t0
     timings.append(('Build PolyData', dt))
 
-    # --- 7. Render ---
+    # --- 7. Render with LOD switching ---
     t0 = time.time()
     pl = pv.Plotter(window_size=[1280, 800],
                      title=f'ForestFormer3D — {n:,} points, {n_trees} trees ({args.mode})')
     pl.set_background('#0d1117')
-    pl.add_points(cloud, scalars='rgb', rgb=True, point_size=2.0,
-                  render_points_as_spheres=False)
+
+    # Start with full resolution
+    actor_full = pl.add_points(cloud_full, scalars='rgb', rgb=True,
+                               point_size=2.0, render_points_as_spheres=False)
+    actor_lod = pl.add_points(cloud_lod, scalars='rgb', rgb=True,
+                              point_size=3.0, render_points_as_spheres=False)
+    actor_lod.SetVisibility(False)
+
+    # Switch to LOD during interaction, back to full when idle
+    if n > lod_n:
+        _timer = None
+
+        def on_interact(*args):
+            nonlocal _timer
+            actor_full.SetVisibility(False)
+            actor_lod.SetVisibility(True)
+            # Schedule switch back after 500ms idle
+            if _timer is not None:
+                _timer.cancel()
+            import threading
+            _timer = threading.Timer(0.5, _restore_full)
+            _timer.start()
+
+        def _restore_full():
+            actor_lod.SetVisibility(False)
+            actor_full.SetVisibility(True)
+            pl.render()
+
+        pl.iren.add_observer('InteractionEvent', on_interact)
+
     dt = time.time() - t0
     timings.append(('Init renderer', dt))
 
