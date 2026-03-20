@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ffformer-infer
+  namespace: c30636-default
+  labels:
+    app: ffformer-infer
+    workload.user.cattle.io/workloadselector: apps.deployment-c30636-default-ffformer-infer
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ffformer-infer
+  template:
+    metadata:
+      labels:
+        app: ffformer-infer
+        workload.user.cattle.io/workloadselector: apps.deployment-c30636-default-ffformer-infer
+      namespace: c30636-default
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ffformer-infer
+          image: zhangenzhi/forestformer3d:latest
+          imagePullPolicy: Always
+          # API server (remove command/args to use Dockerfile CMD)
+          # Or use sleep infinity for debugging:
+          #   command: ["sleep"]
+          #   args: ["infinity"]
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: CHECKPOINT_PATH
+              value: /workspace/data/epoch_3000_fix.pth
+            - name: CONFIG_PATH
+              value: /app/configs/jpeaks_test.py
+            - name: RESULTS_DIR
+              value: /tmp/ffformer_results
+            - name: PYTHONPATH
+              value: /app
+          volumeMounts:
+            - name: data-vol
+              mountPath: /workspace/data
+          resources:
+            requests:
+              cpu: 32000m
+              memory: 65535Mi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: 32000m
+              memory: 65535Mi
+              nvidia.com/gpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: data-vol
+          persistentVolumeClaim:
+            claimName: ffformer-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ffformer-infer-svc
+  namespace: c30636-default
+  labels:
+    app: ffformer-infer
+spec:
+  type: NodePort
+  selector:
+    app: ffformer-infer
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
