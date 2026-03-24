@@ -76,6 +76,11 @@ class ForestFormerEngine:
         cfg.work_dir = tempfile.mkdtemp(prefix='ffformer_')
         cfg.model.test_cfg['output_dir'] = cfg.work_dir
 
+        # Ensure project root stays in sys.path (mmengine Runner may reset it)
+        if PROJECT_ROOT not in sys.path:
+            sys.path.insert(0, PROJECT_ROOT)
+        os.environ['PYTHONPATH'] = PROJECT_ROOT + ':' + os.environ.get('PYTHONPATH', '')
+
         runner = Runner.from_cfg(cfg)
         self._runner = runner
         self._model = runner.model
