@@ -138,7 +138,7 @@ RUN pip install --no-cache-dir \
 # ── Application code ────────────────────────────────────────────────
 WORKDIR /app
 
-# Application code (rebuild: 2026-03-20)
+# Application code (rebuild: 2026-03-24)
 COPY oneformer3d/ /app/oneformer3d/
 COPY configs/ /app/configs/
 COPY tools/ /app/tools/
