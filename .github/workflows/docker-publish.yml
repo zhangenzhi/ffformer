@@ -41,5 +41,4 @@ jobs:
           tags: |
             zhangenzhi/forestformer3d:latest
             zhangenzhi/forestformer3d:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: true
