@@ -85,8 +85,12 @@ RUN pip install --no-cache-dir --only-binary=:all: numpy==1.24.4 && \
     pip install --no-cache-dir scipy==1.10.1 numba==0.57.0 llvmlite==0.40.0
 
 # ── torch-points-kernels (from source for CUDA support) ─────────────
-RUN pip install --no-cache-dir --no-deps --no-build-isolation \
-    git+https://github.com/nicolas-chaulet/torch-points-kernels.git@0.7.0
+RUN cd /tmp && \
+    git clone https://github.com/nicolas-chaulet/torch-points-kernels.git && \
+    cd torch-points-kernels && \
+    git checkout 0.7.0 && \
+    FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST="9.0" pip install --no-cache-dir --no-deps . && \
+    cd / && rm -rf /tmp/torch-points-kernels
 
 # ── spconv (cu120 forward-compatible with 12.8 driver) ──────────────
 RUN pip install --no-cache-dir spconv-cu120==2.3.6
