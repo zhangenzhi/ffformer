@@ -76,6 +76,12 @@ class ForestFormerEngine:
         cfg.work_dir = tempfile.mkdtemp(prefix='ffformer_')
         cfg.model.test_cfg['output_dir'] = cfg.work_dir
 
+        # Create dummy dataset so Runner can initialize without real data
+        self._dummy_dir = tempfile.mkdtemp(prefix='ffformer_dummy_')
+        self._create_dummy_data(self._dummy_dir)
+        cfg.test_dataloader.dataset.data_root = self._dummy_dir + '/'
+        cfg.test_dataloader.dataset.ann_file = 'info.pkl'
+
         # Ensure project root stays in sys.path (mmengine Runner may reset it)
         if PROJECT_ROOT not in sys.path:
             sys.path.insert(0, PROJECT_ROOT)
@@ -86,6 +92,35 @@ class ForestFormerEngine:
         self._model = runner.model
         self._model.eval()
         print(f'[Engine] Model loaded on {self.device}')
+
+    @staticmethod
+    def _create_dummy_data(tmpdir):
+        """Create minimal dummy dataset files for Runner initialization."""
+        import pickle
+        scene_name = 'dummy_test'
+        for subdir in ('points', 'semantic_mask', 'instance_mask'):
+            os.makedirs(os.path.join(tmpdir, subdir), exist_ok=True)
+        # 3 dummy points
+        np.array([[0, 0, 0]], dtype=np.float32).tofile(
+            os.path.join(tmpdir, 'points', f'{scene_name}.bin'))
+        np.zeros(1, dtype=np.int64).tofile(
+            os.path.join(tmpdir, 'semantic_mask', f'{scene_name}.bin'))
+        np.zeros(1, dtype=np.int64).tofile(
+            os.path.join(tmpdir, 'instance_mask', f'{scene_name}.bin'))
+        info = {
+            'metainfo': {'categories': {'ground': 0, 'wood': 1, 'leaf': 2},
+                         'dataset': 'ForAINetV2', 'info_version': '1.1'},
+            'data_list': [{
+                'lidar_points': {'num_pts_feats': 3,
+                                 'lidar_path': f'{scene_name}.bin'},
+                'instances': [],
+                'pts_semantic_mask_path': f'{scene_name}.bin',
+                'pts_instance_mask_path': f'{scene_name}.bin',
+                'axis_align_matrix': np.eye(4).tolist(),
+            }],
+        }
+        with open(os.path.join(tmpdir, 'info.pkl'), 'wb') as f:
+            pickle.dump(info, f)
 
     def predict(self, xyz, output_ply_path=None):
         """Run inference on a point cloud.
