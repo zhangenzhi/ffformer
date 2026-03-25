@@ -249,11 +249,46 @@ def _run_inference_background(task_id, input_path, suffix, subsample, max_points
 
 @app.get("/health")
 def health():
-    return {
+    import platform
+    info = {
         "status": "ok",
         "model_loaded": _engine is not None,
-        "gpu_available": True,  # Will be checked at runtime
+        "gpu_available": False,
+        "system": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "cpu_count": os.cpu_count(),
+        },
     }
+    try:
+        import torch
+        info["gpu_available"] = torch.cuda.is_available()
+        info["torch"] = torch.__version__
+        if torch.cuda.is_available():
+            info["gpu"] = {
+                "name": torch.cuda.get_device_name(0),
+                "count": torch.cuda.device_count(),
+                "memory_total_gb": round(torch.cuda.get_device_properties(0).total_mem / 1e9, 1),
+                "cuda_version": torch.version.cuda,
+            }
+    except ImportError:
+        pass
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        info["system"]["ram_total_gb"] = round(mem.total / 1e9, 1)
+        info["system"]["ram_used_gb"] = round(mem.used / 1e9, 1)
+    except ImportError:
+        pass
+    # Checkpoint info
+    ckpt = os.environ.get('CHECKPOINT_PATH', '')
+    if ckpt and os.path.isfile(ckpt):
+        info["checkpoint"] = {
+            "path": ckpt,
+            "filename": os.path.basename(ckpt),
+            "size_mb": round(os.path.getsize(ckpt) / 1e6, 1),
+        }
+    return info
 
 
 @app.post("/predict")

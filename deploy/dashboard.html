@@ -160,6 +160,20 @@ header .dot.off { background:var(--red); }
   display:flex; gap:16px; align-items:center; }
 .info-bar .sep { color:var(--border); }
 
+/* Hardware panel */
+.hw-panel { position:absolute; left:10px; top:10px; z-index:15;
+  background:rgba(22,27,34,0.92); backdrop-filter:blur(6px);
+  border:1px solid var(--border); border-radius:var(--radius);
+  padding:8px 12px; font-size:10px; max-width:220px; }
+.hw-title { font-size:9px; text-transform:uppercase; letter-spacing:0.8px;
+  color:var(--text2); margin-bottom:4px; font-weight:600; }
+.hw-content { color:var(--text); line-height:1.6; }
+.hw-content .hw-row { display:flex; justify-content:space-between; gap:8px; }
+.hw-content .hw-label { color:var(--text2); }
+.hw-content .hw-val { font-weight:600; text-align:right; }
+.hw-gpu { color:var(--green); font-weight:700; }
+.hw-nogpu { color:var(--red); }
+
 /* Download buttons */
 .downloads { padding:12px 16px; border-top:1px solid var(--border); }
 .downloads .btn { margin-top:0; margin-bottom:6px; font-size:12px; padding:6px;
@@ -340,6 +354,12 @@ header .dot.off { background:var(--red); }
       <span id="infoPoints"></span>
       <span class="sep">|</span>
       <span id="infoTime"></span>
+    </div>
+
+    <!-- Hardware spec panel -->
+    <div class="hw-panel" id="hwPanel">
+      <div class="hw-title">Hardware</div>
+      <div class="hw-content" id="hwContent">Loading...</div>
     </div>
   </div>
 </div>
@@ -1357,10 +1377,47 @@ async function checkHealth() {
     document.getElementById('statusDot').className = 'dot on';
     document.getElementById('statusText').textContent =
       `GPU Ready${data.model_loaded ? ' · Model Loaded' : ''}`;
+    updateHardwarePanel(data);
   } catch(e) {
     document.getElementById('statusDot').className = 'dot off';
     document.getElementById('statusText').textContent = 'Server Offline';
+    document.getElementById('hwContent').textContent = 'Server offline';
   }
+}
+
+function updateHardwarePanel(data) {
+  const el = document.getElementById('hwContent');
+  let html = '';
+  const row = (label, val) => `<div class="hw-row"><span class="hw-label">${label}</span><span class="hw-val">${val}</span></div>`;
+
+  if (data.gpu_available && data.gpu) {
+    const g = data.gpu;
+    html += `<div class="hw-gpu">${g.name}</div>`;
+    html += row('VRAM', g.memory_total_gb + ' GB');
+    html += row('GPU Count', g.count);
+    html += row('CUDA', g.cuda_version);
+  } else {
+    html += '<div class="hw-nogpu">No GPU</div>';
+  }
+
+  if (data.system) {
+    const s = data.system;
+    if (s.ram_total_gb) html += row('RAM', s.ram_total_gb + ' / ' + (s.ram_used_gb || '?') + ' GB');
+    html += row('CPU', s.cpu_count + ' cores');
+  }
+
+  if (data.torch) html += row('PyTorch', data.torch);
+
+  if (data.checkpoint) {
+    html += row('Model', data.checkpoint.filename);
+    html += row('Size', data.checkpoint.size_mb + ' MB');
+  }
+
+  html += row('Status', data.model_loaded
+    ? '<span style="color:var(--green)">Loaded</span>'
+    : '<span style="color:var(--orange)">Idle</span>');
+
+  el.innerHTML = html;
 }
 
 // ==================== INIT ====================
