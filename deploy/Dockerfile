@@ -144,12 +144,15 @@ RUN pip install --no-cache-dir \
 # ── Application code ────────────────────────────────────────────────
 WORKDIR /app
 
-# Application code (rebuild: 2026-03-25)
+# Application code (rebuild: 2026-03-25-v2)
 COPY oneformer3d/ /app/oneformer3d/
 COPY configs/ /app/configs/
 COPY tools/ /app/tools/
 COPY deploy/ /app/deploy/
 COPY mmcv_compat.py /app/
+
+# Allow non-root user (1000) to write to /app for hot-patching
+RUN chmod -R a+w /app/deploy/ /app/configs/
 
 ENV PYTHONPATH=/app
 ENV CHECKPOINT_PATH=/weights/epoch_3000_fix.pth
