@@ -151,11 +151,17 @@ COPY tools/ /app/tools/
 COPY deploy/ /app/deploy/
 COPY mmcv_compat.py /app/
 
-# Allow non-root user (1000) to write to /app for hot-patching and git pull
-RUN chmod -R a+w /app/ && \
+# Create home dir for user 1000 and setup git for hot-patching
+RUN mkdir -p /home/appuser && chmod 777 /home/appuser && \
+    chmod -R a+rw /app/ && \
     cd /app && git init && \
+    git config --global --add safe.directory /app && \
     git remote add origin https://github.com/zhangenzhi/ffformer.git && \
-    git fetch origin main --depth=1
+    git fetch origin main --depth=1 && \
+    cp /root/.gitconfig /home/appuser/.gitconfig 2>/dev/null; \
+    chmod 666 /home/appuser/.gitconfig 2>/dev/null; true
+
+ENV HOME=/home/appuser
 
 ENV PYTHONPATH=/app
 ENV CHECKPOINT_PATH=/weights/epoch_3000_fix.pth
