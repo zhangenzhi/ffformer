@@ -5,6 +5,7 @@ cd /app
 
 # Pull latest code from GitHub (code-only update, no env rebuild)
 echo "[entrypoint] Pulling latest code from GitHub..."
+git config --global --add safe.directory /app
 git fetch origin main --depth=1 2>/dev/null && \
 git reset --hard origin/main 2>/dev/null && \
 echo "[entrypoint] Code updated to $(git rev-parse --short HEAD)" || \
