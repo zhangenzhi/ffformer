@@ -276,6 +276,7 @@ header .dot.off { background:var(--red); }
           <span class="elapsed" id="progressElapsed">0.0s</span>
         </div>
         <div class="progress"><div class="bar" id="progressBar" style="width:0%"></div></div>
+        <div class="progress-detail" id="progressDetail" style="font-size:10px;color:#8b949e;margin:4px 0;text-align:center;display:none"></div>
         <div class="progress-steps">
           <div class="step" id="stepRead">Read</div>
           <div class="step" id="stepSubsample">Subsample</div>
@@ -411,13 +412,14 @@ function selectFile(f) {
 }
 
 // Step order for progress tracking
-const STEP_ORDER = ['uploading', 'reading', 'subsampling', 'inferring', 'saving', 'completed'];
+const STEP_ORDER = ['uploading', 'reading', 'subsampling', 'inferring', 'saving', 'tiling', 'completed'];
 const STEP_MAP = {
   'uploading': [],
   'reading': ['stepRead'],
   'subsampling': ['stepRead', 'stepSubsample'],
   'inferring': ['stepRead', 'stepSubsample', 'stepInfer'],
   'saving': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
+  'tiling': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
   'completed': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
 };
 const STEP_ACTIVE = {
@@ -426,17 +428,44 @@ const STEP_ACTIVE = {
   'subsampling': 'stepSubsample',
   'inferring': 'stepInfer',
   'saving': 'stepSave',
+  'tiling': 'stepSave',
   'completed': null,
 };
 
 function updateProgressUI(data) {
   const step = data.step || 'uploading';
   const pct = data.progress || 0;
+  const elapsed = data.elapsed || 0;
 
   progressLabel.textContent = data.step_label || step;
   progressBar.style.width = pct + '%';
   progressBar.classList.toggle('indeterminate', step === 'inferring' && pct < 90);
-  progressElapsed.textContent = (data.elapsed || 0).toFixed(1) + 's';
+  progressElapsed.textContent = elapsed.toFixed(1) + 's';
+
+  // Show detail info: speed, points, ETA
+  const detail = document.getElementById('progressDetail');
+  const stats = data.stats || {};
+  let detailText = '';
+  if (step === 'reading' || step === 'subsampling') {
+    const pts = stats.n_original || stats.n_points || 0;
+    if (pts > 0) detailText = pts.toLocaleString() + ' points loaded';
+  } else if (step === 'inferring') {
+    const pts = stats.n_processed || 0;
+    if (pts > 0) detailText = pts.toLocaleString() + ' points processing';
+    if (elapsed > 0 && pct > 0 && pct < 100) {
+      const eta = (elapsed / pct * (100 - pct)).toFixed(0);
+      detailText += ` · ETA ~${eta}s`;
+    }
+  } else if (step === 'tiling') {
+    detailText = 'Building streaming viewer tiles...';
+  } else if (step === 'completed') {
+    const trees = stats.n_trees || 0;
+    const pts = stats.n_original || 0;
+    const infTime = stats.inference_time || 0;
+    detailText = `${trees} trees · ${pts.toLocaleString()} pts · ${infTime.toFixed(1)}s inference`;
+  }
+  detail.textContent = detailText;
+  detail.style.display = detailText ? 'block' : 'none';
 
   // Update step dots
   const doneSteps = STEP_MAP[step] || [];
@@ -522,10 +551,36 @@ uploadBtn.addEventListener('click', async () => {
   formData.append('file', selectedFile);
   const sub = document.getElementById('paramSubsample').value;
   const maxp = document.getElementById('paramMaxPts').value;
+  const fileSize = selectedFile.size;
+  const uploadStart = Date.now();
 
   try {
-    const resp = await fetch(`${API}/predict?subsample=${sub}&max_points=${maxp}`, {
-      method: 'POST', body: formData
+    // Use XMLHttpRequest for upload progress
+    const resp = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API}/predict?subsample=${sub}&max_points=${maxp}`);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round(e.loaded / e.total * 10); // 0-10% for upload phase
+          const elapsed = (Date.now() - uploadStart) / 1000;
+          const speed = e.loaded / elapsed;
+          const eta = (e.total - e.loaded) / speed;
+          progressBar.style.width = pct + '%';
+          progressElapsed.textContent = elapsed.toFixed(1) + 's';
+          const detail = document.getElementById('progressDetail');
+          detail.textContent = `${(e.loaded/1e6).toFixed(0)}/${(e.total/1e6).toFixed(0)} MB · ${(speed/1e6).toFixed(1)} MB/s · ETA ${eta.toFixed(0)}s`;
+          detail.style.display = 'block';
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ok: true, json: () => JSON.parse(xhr.responseText)});
+        } else {
+          resolve({ok: false, json: () => JSON.parse(xhr.responseText)});
+        }
+      };
+      xhr.onerror = () => reject(new Error('Upload failed'));
+      xhr.send(formData);
     });
     const data = await resp.json();
 

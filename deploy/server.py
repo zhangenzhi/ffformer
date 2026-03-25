@@ -164,9 +164,12 @@ def _run_inference_background(task_id, input_path, suffix, subsample, max_points
 
         n_processed = len(xyz)
         _log_task(task_id, t_start, f"{n_processed:,} points after subsampling")
+        _update_task_progress(task_id, 'subsampling', progress=45,
+                              stats={'n_original': n_original, 'n_processed': n_processed})
 
         # Inference
-        _update_task_progress(task_id, 'inferring', progress=50)
+        _update_task_progress(task_id, 'inferring', progress=50,
+                              stats={'n_original': n_original, 'n_processed': n_processed})
         _log_task(task_id, t_start, "Running inference...")
         task_dir = os.path.dirname(input_path)
         output_ply = os.path.join(task_dir, 'result.ply')

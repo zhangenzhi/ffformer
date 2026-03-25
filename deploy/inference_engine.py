@@ -181,7 +181,7 @@ class ForestFormerEngine:
         with open(pkl_path, 'wb') as f:
             pickle.dump(info, f)
 
-        # Reconfigure dataloader
+        # Reconfigure dataloader with actual data
         cfg = self._runner.cfg
         cfg.test_dataloader.dataset.data_root = tmpdir + '/'
         cfg.test_dataloader.dataset.ann_file = 'info.pkl'
@@ -189,6 +189,10 @@ class ForestFormerEngine:
         if output_ply_path:
             out_dir = os.path.dirname(output_ply_path) or '.'
             cfg.model.test_cfg['output_dir'] = out_dir
+
+        # Rebuild test dataloader with new data (cfg changes don't affect existing loader)
+        from mmengine.runner import Runner
+        self._runner.test_dataloader = Runner.build_dataloader(cfg.test_dataloader)
 
         # Run
         print(f'[Engine] Running inference on {N:,} points ...')
