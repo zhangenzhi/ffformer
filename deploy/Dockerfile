@@ -151,8 +151,11 @@ COPY tools/ /app/tools/
 COPY deploy/ /app/deploy/
 COPY mmcv_compat.py /app/
 
-# Allow non-root user (1000) to write to /app for hot-patching
-RUN chmod -R a+w /app/deploy/ /app/configs/
+# Allow non-root user (1000) to write to /app for hot-patching and git pull
+RUN chmod -R a+w /app/ && \
+    cd /app && git init && \
+    git remote add origin https://github.com/zhangenzhi/ffformer.git && \
+    git fetch origin main --depth=1
 
 ENV PYTHONPATH=/app
 ENV CHECKPOINT_PATH=/weights/epoch_3000_fix.pth
@@ -164,4 +167,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["uvicorn", "deploy.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+COPY deploy/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]
