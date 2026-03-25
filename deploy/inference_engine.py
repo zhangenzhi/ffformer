@@ -191,8 +191,8 @@ class ForestFormerEngine:
             cfg.model.test_cfg['output_dir'] = out_dir
 
         # Rebuild test dataloader with new data (cfg changes don't affect existing loader)
-        from mmengine.runner import Runner
-        self._runner.test_dataloader = Runner.build_dataloader(cfg.test_dataloader)
+        from mmengine.runner import Runner as _Runner
+        self._runner._test_dataloader = _Runner.build_dataloader(cfg.test_dataloader)
 
         # Run
         print(f'[Engine] Running inference on {N:,} points ...')
