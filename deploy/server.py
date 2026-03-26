@@ -298,16 +298,14 @@ def _save_result_ply(path, xyz, semantic, instance, scores):
 
 
 def _run_inference_background(tasks_proxy, task_id, input_path, suffix, tile_size, overlap):
-    """Tile-based full-resolution inference — mirrors tools/tile_and_infer.py exactly.
+    """Tile-based full-resolution inference with resident model.
 
-    Each tile runs tools/test.py as a fresh subprocess (clean Runner/model each time).
-    This matches the proven tile_and_infer.py pipeline.
+    Model loads once, all tiles reuse it via engine.predict(global_zmin=...).
+    Same split/merge logic as tools/tile_and_infer.py but without subprocess overhead.
     """
     global tasks
     tasks = tasks_proxy
     t_start = time.time()
-    import pickle
-    import subprocess as sp
     try:
         # ── Step 1: Read ──
         _update_task_progress(task_id, 'reading')
@@ -327,113 +325,61 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, tile_siz
         N = len(xyz)
         xmin, xmax = xyz[:, 0].min(), xyz[:, 0].max()
         ymin, ymax = xyz[:, 1].min(), xyz[:, 1].max()
-        zmin = xyz[:, 2].min()
+        zmin = float(xyz[:, 2].min())
         dx, dy = xmax - xmin, ymax - ymin
         _log_task(task_id, t_start, f"{N:,} points, extent {dx:.0f}x{dy:.0f}m")
 
-        # ── Step 2: Split into tiles (same as tools/tile_and_infer.py cmd_split) ──
+        # ── Step 2: Split into tiles (same as tile_and_infer.py) ──
         _update_task_progress(task_id, 'splitting', progress=15)
         task_dir = os.path.dirname(input_path)
-        task_name = f'task_{task_id}'
 
         nx = max(1, int(np.ceil(dx / tile_size)))
         ny = max(1, int(np.ceil(dy / tile_size)))
         _log_task(task_id, t_start, f"Tile grid: {nx}x{ny} ({tile_size}m, overlap={overlap}m)")
 
-        # Prepare data dirs (same paths as tile_and_infer.py)
-        data_root = os.path.join(task_dir, 'data')
-        pts_dir = os.path.join(data_root, 'points')
-        sem_dir = os.path.join(data_root, 'semantic_mask')
-        ins_dir = os.path.join(data_root, 'instance_mask')
-        for d in [pts_dir, sem_dir, ins_dir]:
-            os.makedirs(d, exist_ok=True)
-
-        tiles_meta = []
+        tiles = []
         for ix in range(nx):
             for iy in range(ny):
                 tx0 = xmin + ix * tile_size - overlap
                 tx1 = xmin + (ix + 1) * tile_size + overlap
                 ty0 = ymin + iy * tile_size - overlap
                 ty1 = ymin + (iy + 1) * tile_size + overlap
-                cx0 = xmin + ix * tile_size
-                cx1 = min(xmin + (ix + 1) * tile_size, xmax)
-                cy0 = ymin + iy * tile_size
-                cy1 = min(ymin + (iy + 1) * tile_size, ymax)
 
                 mask = ((xyz[:, 0] >= tx0) & (xyz[:, 0] <= tx1) &
                         (xyz[:, 1] >= ty0) & (xyz[:, 1] <= ty1))
                 n_pts = int(mask.sum())
                 if n_pts < 100:
                     continue
-
-                tid = len(tiles_meta)
-                tile_xyz = xyz[mask].copy()
-                tile_global_idx = np.where(mask)[0]
-
-                # Normalize (same as tile_and_infer.py)
-                mean_x = tile_xyz[:, 0].mean()
-                mean_y = tile_xyz[:, 1].mean()
-                tile_xyz_norm = tile_xyz.copy()
-                tile_xyz_norm[:, 0] -= mean_x
-                tile_xyz_norm[:, 1] -= mean_y
-                tile_xyz_norm[:, 2] -= zmin
-                tile_xyz_norm = tile_xyz_norm.astype(np.float32)
-
-                tile_name = f'{task_name}_tile{tid:03d}_test'
-                tile_dir_i = os.path.join(task_dir, f'tile{tid:03d}')
-                os.makedirs(tile_dir_i, exist_ok=True)
-
-                # Write bin files
-                tile_xyz_norm.tofile(os.path.join(pts_dir, f'{tile_name}.bin'))
-                np.zeros(n_pts, dtype=np.int64).tofile(os.path.join(sem_dir, f'{tile_name}.bin'))
-                np.zeros(n_pts, dtype=np.int64).tofile(os.path.join(ins_dir, f'{tile_name}.bin'))
-
-                # Save global indices for merge
-                np.save(os.path.join(tile_dir_i, 'global_idx.npy'), tile_global_idx)
-
-                # Create pkl
-                info = {
-                    'metainfo': {'categories': {'ground': 0, 'wood': 1, 'leaf': 2},
-                                 'dataset': 'ForAINetV2', 'info_version': '1.1'},
-                    'data_list': [{
-                        'lidar_points': {'num_pts_feats': 3, 'lidar_path': f'{tile_name}.bin'},
-                        'instances': [],
-                        'pts_semantic_mask_path': f'{tile_name}.bin',
-                        'pts_instance_mask_path': f'{tile_name}.bin',
-                        'axis_align_matrix': np.eye(4).tolist(),
-                    }],
-                }
-                pkl_name = f'info_tile{tid:03d}.pkl'
-                pkl_path = os.path.join(data_root, pkl_name)
-                with open(pkl_path, 'wb') as f:
-                    pickle.dump(info, f)
-
-                tiles_meta.append({
-                    'tile_id': tid,
-                    'tile_name': tile_name,
+                tiles.append({
+                    'global_idx': np.where(mask)[0],
                     'n_points': n_pts,
-                    'core_bounds': [float(cx0), float(cy0), float(cx1), float(cy1)],
-                    'offsets': [float(mean_x), float(mean_y), float(zmin)],
-                    'pkl': pkl_name,
-                    'tile_dir': tile_dir_i,
                 })
 
-        n_tiles = len(tiles_meta)
+        n_tiles = len(tiles)
         _log_task(task_id, t_start, f"{n_tiles} non-empty tiles")
         _update_task_progress(task_id, 'splitting', progress=18,
                               stats={'n_original': N, 'n_processed': N,
                                      'n_tiles': n_tiles, 'tile_size': tile_size})
 
-        # ── Step 3: Infer each tile via tools/test.py subprocess ──
-        config_path = os.environ.get('CONFIG_PATH',
-                                     os.path.join(PROJECT_ROOT, 'configs', 'jpeaks_test.py'))
-        ckpt_path = os.environ.get('CHECKPOINT_PATH',
-                                   os.path.join(PROJECT_ROOT, 'work_dirs',
-                                                'clean_forestformer', 'epoch_3000_fix.pth'))
-        test_script = os.path.join(PROJECT_ROOT, 'tools', 'test.py')
+        # ── Step 3: Load model ONCE ──
+        from deploy.inference_engine import ForestFormerEngine
+        config = os.environ.get('CONFIG_PATH',
+                                os.path.join(PROJECT_ROOT, 'configs', 'jpeaks_test.py'))
+        ckpt = os.environ.get('CHECKPOINT_PATH',
+                              os.path.join(PROJECT_ROOT, 'work_dirs',
+                                           'clean_forestformer', 'epoch_3000_fix.pth'))
+        _log_task(task_id, t_start, "Loading model (once for all tiles)...")
+        engine = ForestFormerEngine(config_path=config, checkpoint_path=ckpt)
+        _log_task(task_id, t_start, "Model loaded")
+
+        # ── Step 4: Infer each tile (model resident, no reload) ──
+        sem_pred = np.full(N, -1, dtype=np.int32)
+        inst_pred = np.full(N, -1, dtype=np.int32)
+        scores_arr = np.full(N, -1.0, dtype=np.float32)
+        max_instance_id = 0
         t_infer_start = time.time()
 
-        for i, tile in enumerate(tiles_meta):
+        for i, tile in enumerate(tiles):
             progress = 20 + int(65 * i / n_tiles)
             _update_task_progress(task_id, 'inferring', progress=progress,
                                   stats={'n_original': N, 'n_processed': N,
@@ -441,93 +387,67 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, tile_siz
                                          'tile_points': tile['n_points']})
             _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
 
-            # Run tools/test.py as subprocess (fresh Runner each time)
-            cmd = [
-                sys.executable, test_script,
-                config_path, ckpt_path,
-                '--work-dir', tile['tile_dir'],
-                '--cfg-options',
-                f'test_dataloader.dataset.data_root={data_root}/',
-                f'test_dataloader.dataset.ann_file={tile["pkl"]}',
-            ]
-            t0 = time.time()
-            proc = sp.run(cmd, cwd=PROJECT_ROOT, timeout=7200,
-                          capture_output=True, text=True)
-            dt = round(time.time() - t0, 1)
+            tile_xyz = xyz[tile['global_idx']]
+            tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
 
-            # Check for output PLY and generate preview with original coordinates
-            result_ply = os.path.join(tile['tile_dir'], f'{tile["tile_name"]}.ply')
-            if os.path.exists(result_ply):
-                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: done in {dt}s")
+            try:
+                t0 = time.time()
+                # global_zmin matches tile_and_infer.py normalization:
+                # center XY per tile, shift Z to global scene minimum
+                result = engine.predict(tile_xyz, output_ply_path=tile_ply,
+                                        global_zmin=zmin)
+                dt = round(time.time() - t0, 1)
+
+                tile_sem = result.get('semantic_pred')
+                tile_inst = result.get('instance_pred')
+                tile_scores = result.get('instance_scores')
+
+                # Score-based merge (same as tile_and_infer.py cmd_merge)
+                if tile_inst is not None and tile_scores is not None:
+                    gi = tile['global_idx']
+                    for j in range(len(gi)):
+                        g = gi[j]
+                        sc = float(tile_scores[j])
+                        if sc > scores_arr[g]:
+                            if tile_sem is not None:
+                                sem_pred[g] = int(tile_sem[j])
+                            inst_id = int(tile_inst[j])
+                            inst_pred[g] = (inst_id + max_instance_id) if inst_id >= 0 else -1
+                            scores_arr[g] = sc
+
+                    tile_max = int(tile_inst.max()) if len(tile_inst) > 0 else 0
+                    if tile_max >= 0:
+                        max_instance_id += tile_max + 1
+
+                tile_trees = len(set(tile_inst[tile_inst >= 0].tolist())) if tile_inst is not None else 0
+                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile_trees} trees in {dt}s")
+
                 # Generate preview PLY with original coordinates for incremental viewer
+                offsets = [float(tile_xyz[:, 0].mean()),
+                           float(tile_xyz[:, 1].mean()), zmin]
                 try:
-                    _generate_tile_preview(result_ply, tile['offsets'],
+                    _generate_tile_preview(tile_ply, offsets,
                                            os.path.join(task_dir, f'tile_{i}_preview.ply'))
-                except Exception as pe:
-                    _log_task(task_id, t_start, f"  Preview generation failed: {pe}")
+                except Exception:
+                    pass
+
                 _update_task_progress(task_id, 'inferring', progress=progress,
                                       stats={'n_original': N, 'n_processed': N,
                                              'n_tiles': n_tiles, 'current_tile': i + 1,
                                              'tile_points': tile['n_points']},
                                       completed_tiles=i + 1)
-            else:
-                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: no PLY output (exit={proc.returncode})")
-                if proc.stderr:
-                    _log_task(task_id, t_start, f"  stderr: {proc.stderr[-500:]}")
+
+                # Clean up tile PLY (preview is kept)
+                if os.path.exists(tile_ply):
+                    os.remove(tile_ply)
+
+            except Exception as e:
+                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles} failed: {e}")
 
         inference_time = round(time.time() - t_infer_start, 1)
 
-        # ── Step 4: Merge (same as tools/tile_and_infer.py cmd_merge) ──
+        # ── Step 5: Merge stats ──
         _update_task_progress(task_id, 'merging', progress=85)
-        _log_task(task_id, t_start, "Merging tile results...")
-
-        sem_pred = np.full(N, -1, dtype=np.int32)
-        inst_pred = np.full(N, -1, dtype=np.int32)
-        scores_arr = np.full(N, -1.0, dtype=np.float32)
-        max_instance_id = 0
-
-        for tile in tiles_meta:
-            tid = tile['tile_id']
-            result_ply = os.path.join(tile['tile_dir'], f'{tile["tile_name"]}.ply')
-            if not os.path.exists(result_ply):
-                _log_task(task_id, t_start, f"  Tile {tid}: no result, skip")
-                continue
-
-            global_idx = np.load(os.path.join(tile['tile_dir'], 'global_idx.npy'))
-
-            # Parse PLY
-            fields = []
-            with open(result_ply, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('property'):
-                        fields.append(line.split()[-1])
-                    elif line == 'end_header':
-                        break
-                col = {name: idx for idx, name in enumerate(fields)}
-                rows = []
-                for line in f:
-                    rows.append(line.strip().split())
-
-            n = len(rows)
-            assigned = 0
-            for j in range(n):
-                gi = global_idx[j]
-                s = int(rows[j][col['semantic_pred']])
-                inst = int(rows[j][col['instance_pred']])
-                sc = float(rows[j][col['score']])
-
-                if sc > scores_arr[gi]:
-                    sem_pred[gi] = s
-                    inst_pred[gi] = (inst + max_instance_id) if inst >= 0 else -1
-                    scores_arr[gi] = sc
-                    assigned += 1
-
-            tile_max = max(int(rows[j][col['instance_pred']]) for j in range(n)) if n > 0 else 0
-            if tile_max >= 0:
-                max_instance_id += tile_max + 1
-            _log_task(task_id, t_start, f"  Tile {tid}: {n:,} pts, assigned {assigned:,}")
-
         n_trees = len(set(inst_pred[inst_pred >= 0].tolist()))
         n_assigned = int((inst_pred >= 0).sum())
         _log_task(task_id, t_start, f"Merged: {n_trees} trees, {n_assigned:,}/{N:,} assigned")

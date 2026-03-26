@@ -122,13 +122,15 @@ class ForestFormerEngine:
         with open(os.path.join(tmpdir, 'info.pkl'), 'wb') as f:
             pickle.dump(info, f)
 
-    def predict(self, xyz, output_ply_path=None):
+    def predict(self, xyz, output_ply_path=None, global_zmin=None):
         """Run inference on a point cloud.
 
         Args:
             xyz: numpy array (N, 3) float32/float64, raw coordinates.
                  Will be normalized internally (center XY, shift Z).
             output_ply_path: optional path to save result PLY.
+            global_zmin: if provided, use this as Z offset instead of tile's
+                         local min_z. Matches tile_and_infer.py normalization.
 
         Returns:
             dict with keys: points, semantic_pred, instance_pred, instance_scores
@@ -139,9 +141,9 @@ class ForestFormerEngine:
         N = len(xyz)
         assert xyz.shape == (N, 3), f"Expected (N,3), got {xyz.shape}"
 
-        # Normalize
+        # Normalize: center XY per tile, shift Z to global min
         mean_x, mean_y = xyz[:, 0].mean(), xyz[:, 1].mean()
-        min_z = xyz[:, 2].min()
+        min_z = global_zmin if global_zmin is not None else xyz[:, 2].min()
         xyz_norm = xyz.copy()
         xyz_norm[:, 0] -= mean_x
         xyz_norm[:, 1] -= mean_y
