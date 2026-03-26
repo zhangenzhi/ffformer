@@ -112,6 +112,17 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
 .task-stats { margin-top:8px; font-size:11px; color:var(--text2);
   display:grid; grid-template-columns:1fr 1fr; gap:2px 12px; }
 .task-stats .val { color:var(--text); font-weight:600; }
+.tile-grid { margin-top:8px; display:grid; grid-template-columns:repeat(auto-fill, minmax(100px, 1fr)); gap:4px; }
+.tile-cell { font-size:9px; padding:4px 6px; border-radius:3px; background:var(--bg3);
+  border:1px solid var(--border); line-height:1.4; }
+.tile-cell.done { border-color:var(--green); background:rgba(63,185,80,0.08); }
+.tile-cell.running { border-color:var(--accent); background:rgba(88,166,255,0.08);
+  animation:stagePulse 1.5s ease-in-out infinite; }
+.tile-cell.failed { border-color:var(--red); background:rgba(248,81,73,0.08); }
+.tile-cell .tile-head { font-weight:700; color:var(--text); }
+.tile-cell.done .tile-head { color:var(--green); }
+.tile-cell.running .tile-head { color:var(--accent); }
+.tile-cell .tile-detail { color:var(--text2); }
 
 /* Files panel */
 .files-panel { flex:1; overflow-y:auto; padding:8px; display:none; }
@@ -769,6 +780,32 @@ async function deleteTask(taskId) {
 }
 
 // ==================== TASK LIST ====================
+function renderTileGrid(tileInfo) {
+  if (!tileInfo || tileInfo.length === 0) return '';
+  let html = '<div class="tile-grid">';
+  for (let i = 0; i < tileInfo.length; i++) {
+    const ti = tileInfo[i];
+    const st = ti.status || 'pending';
+    let detail = '';
+    if (st === 'done') {
+      detail = `${(ti.n_trees||0)} trees · ${ti.time}s`;
+    } else if (st === 'running') {
+      detail = `${(ti.n_points||0).toLocaleString()} pts`;
+    } else if (st === 'failed') {
+      detail = 'failed';
+    }
+    html += `<div class="tile-cell ${st}">
+      <div class="tile-head">Tile ${i+1}</div>
+      <div class="tile-detail">${detail}</div>
+    </div>`;
+  }
+  // Show pending tiles that haven't started yet
+  const nTiles = (tileInfo.length > 0 && tileInfo[0].status !== 'pending') ? 0 :
+    tileInfo.filter(t => t.status === 'pending').length;
+  html += '</div>';
+  return html;
+}
+
 function renderTaskList() {
   const el = document.getElementById('taskList');
   let html = '<h3>Results</h3>';
@@ -793,6 +830,7 @@ function renderTaskList() {
         <div>Ground: <span class="val">${(stats.semantic.ground||0).toLocaleString()}</span></div>
         <div>Leaf: <span class="val">${(stats.semantic.leaf||0).toLocaleString()}</span></div>` : ''}
       </div>` : ''}
+      ${status === 'processing' && t.tile_info ? renderTileGrid(t.tile_info) : ''}
     </div>`;
   }
   el.innerHTML = html;

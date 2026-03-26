@@ -187,6 +187,20 @@ def _update_task_progress(task_id, step, progress=None, **extra):
     tasks[task_id] = t  # atomic reassignment to Manager dict
 
 
+def _update_tile_info(task_id, tile_idx, info):
+    """Update per-tile status info (Manager dict needs full reassignment)."""
+    if task_id not in tasks:
+        return
+    t = dict(tasks[task_id])
+    tile_info = list(t.get('tile_info', []))
+    # Extend list if needed
+    while len(tile_info) <= tile_idx:
+        tile_info.append({'status': 'pending'})
+    tile_info[tile_idx] = info
+    t['tile_info'] = tile_info
+    tasks[task_id] = t
+
+
 def _log_task(task_id, t_start, message):
     """Append a timestamped log message to the task's log list."""
     elapsed = round(time.time() - t_start, 1)
@@ -370,12 +384,22 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
                                   stats={'n_original': n_original, 'n_processed': n_subsampled,
                                          'n_tiles': n_tiles, 'current_tile': i + 1,
                                          'tile_points': tile_n})
+
+            # Record tile as "running"
+            _update_tile_info(task_id, i, {
+                'status': 'running', 'n_points': tile_n,
+                'center': [round(tile_center[0], 1), round(tile_center[1], 1)],
+                'start': time.time(),
+            })
+
             _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile_n:,} points "
                       f"at ({tile_center[0]:.0f}, {tile_center[1]:.0f})")
 
             try:
                 tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
+                t_tile_start = time.time()
                 result = engine.predict(tile_xyz, output_ply_path=tile_ply)
+                tile_time = round(time.time() - t_tile_start, 1)
                 tile_results.append(result)
 
                 # Save tile PLY with original coordinates for streaming preview
@@ -391,7 +415,14 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
                 tile_trees = 0
                 if inst is not None:
                     tile_trees = len(set(inst[inst >= 0]))
-                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile_trees} trees found")
+                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile_trees} trees found in {tile_time}s")
+
+                # Update tile info as done
+                _update_tile_info(task_id, i, {
+                    'status': 'done', 'n_points': tile_n,
+                    'center': [round(tile_center[0], 1), round(tile_center[1], 1)],
+                    'n_trees': tile_trees, 'time': tile_time,
+                })
 
                 # Mark tile as available for streaming preview
                 _update_task_progress(task_id, 'inferring', progress=progress,
@@ -401,6 +432,10 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
                                       completed_tiles=i + 1)
             except Exception as tile_err:
                 _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles} failed: {tile_err}")
+                _update_tile_info(task_id, i, {
+                    'status': 'failed', 'n_points': tile_n,
+                    'error': str(tile_err),
+                })
                 tile_results.append(None)
 
         inference_time = time.time() - t_infer_start
@@ -648,6 +683,7 @@ def task_status(task_id: str):
         result['hw'] = _get_gpu_utilization()
         result['completed_tiles'] = task.get('completed_tiles', 0)
         result['stats'] = task.get('stats', {})
+        result['tile_info'] = task.get('tile_info', [])
 
     if task['status'] == 'completed':
         result['stats'] = task.get('stats', {})
