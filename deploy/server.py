@@ -44,9 +44,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import numpy as np
 
-# Use 'spawn' to avoid CUDA fork issues in subprocess
+# Use 'fork' (default on Linux). Safe because parent process never initializes CUDA
+# — model loading happens only in the subprocess.
 try:
-    multiprocessing.set_start_method('spawn', force=True)
+    multiprocessing.set_start_method('fork', force=True)
 except RuntimeError:
     pass  # already set
 
@@ -100,17 +101,8 @@ def get_engine():
 
 
 # --- Task tracking (shared across processes via Manager) ---
-# Manager is only created in the main process; subprocesses receive the proxy via args
-_manager = None
-tasks = None
-
-def _init_task_manager():
-    global _manager, tasks
-    if _manager is None:
-        _manager = multiprocessing.Manager()
-        tasks = _manager.dict()
-
-_init_task_manager()
+_manager = multiprocessing.Manager()
+tasks = _manager.dict()
 
 
 PROGRESS_STEPS = [
