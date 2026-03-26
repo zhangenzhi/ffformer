@@ -62,17 +62,6 @@ RUN SITE_PACKAGES=$(pip show mmengine | grep "^Location:" | awk '{print $2}') &&
     rm -rf /tmp/patches && \
     echo "Patched mmengine and mmdet3d successfully"
 
-# ── MinkowskiEngine (H100 = sm_90) ──────────────────────────────────
-RUN cd /tmp && \
-    git clone https://github.com/NVIDIA/MinkowskiEngine.git && \
-    cd MinkowskiEngine && \
-    git checkout 02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 && \
-    for f in src/*.cu src/3rdparty/*.cuh; do \
-        [ -f "$f" ] && sed -i '1i #include <thrust/execution_policy.h>\n#include <thrust/sort.h>\n#include <thrust/unique.h>\n#include <thrust/remove.h>\n#include <thrust/reduce.h>\n#include <thrust/iterator/zip_iterator.h>\n#include <thrust/tuple.h>\n#include <thrust/system_error.h>' "$f"; \
-    done && \
-    MAX_JOBS=4 FORCE_CUDA=1 BLAS=openblas \
-    python setup.py install --blas=openblas --force_cuda && \
-    cd / && rm -rf /tmp/MinkowskiEngine
 
 # ── torch-scatter + torch-cluster ───────────────────────────────────
 RUN pip install --no-cache-dir \

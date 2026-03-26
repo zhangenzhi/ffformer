@@ -1,7 +1,6 @@
 from .oneformer3d import (
     ForAINetV2OneFormer3D, ForAINetV2OneFormer3D_XAwarequery)
 from .spconv_unet import SpConvUNet
-from .mink_unet import Res16UNet34C
 from .query_decoder import ScanNetQueryDecoder, QueryDecoder, ForAINetv2QueryDecoder, ForAINetv2QueryDecoder_XAwarequery
 from .unified_criterion import (
     ScanNetUnifiedCriterion, ForAINetv2UnifiedCriterion)
