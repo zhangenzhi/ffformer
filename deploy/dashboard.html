@@ -569,6 +569,15 @@ function startPolling(taskId) {
         updateHardwareFromPoll(data.hw);
       }
 
+      // Progressive tile rendering: load new tiles as they complete
+      if (data.completed_tiles && data.completed_tiles > (loadedTiles[taskId] || 0)) {
+        const from = loadedTiles[taskId] || 0;
+        for (let t = from; t < data.completed_tiles; t++) {
+          loadTilePreview(taskId, t);
+        }
+        loadedTiles[taskId] = data.completed_tiles;
+      }
+
       if (data.status === 'completed') {
         clearInterval(pollingTimers[taskId]);
         delete pollingTimers[taskId];
@@ -1681,11 +1690,18 @@ fetch(`${API}/tasks`).then(r=>r.json()).then(data=>{
       progressContainer.classList.add('show');
       uploadBtn.disabled = true;
 
-      // Fetch current status to populate progress bar immediately
+      // Fetch current status to populate progress bar and restore tile previews
       fetch(`${API}/task/${tid}/status`).then(r=>r.json()).then(s=>{
         taskData[tid] = {...taskData[tid], ...s, task_id:tid};
         updateProgressUI(s);
         renderTaskList();
+        // Restore already-completed tile previews
+        if (s.completed_tiles) {
+          for (let i = 0; i < s.completed_tiles; i++) {
+            loadTilePreview(tid, i);
+          }
+          loadedTiles[tid] = s.completed_tiles;
+        }
       }).catch(()=>{});
     }
   }

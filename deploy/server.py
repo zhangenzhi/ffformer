@@ -227,6 +227,51 @@ def _voxel_subsample(xyz, subsample):
     return xyz[sort_idx[keep]]
 
 
+def _generate_tile_preview(ply_path, offsets, preview_path):
+    """Read model output PLY (normalized coords), add offsets to restore
+    original coordinates, and save as preview PLY for incremental viewer."""
+    mean_x, mean_y, zmin = offsets
+    fields = []
+    with open(ply_path, 'r') as f:
+        n_verts = 0
+        for line in f:
+            line = line.strip()
+            if line.startswith('element vertex'):
+                n_verts = int(line.split()[-1])
+            elif line.startswith('property'):
+                fields.append(line.split()[-1])
+            elif line == 'end_header':
+                break
+        col = {name: idx for idx, name in enumerate(fields)}
+        rows = []
+        for line in f:
+            rows.append(line.strip().split())
+
+    if not rows:
+        return
+
+    # Build arrays and restore original coordinates
+    n = len(rows)
+    xyz = np.zeros((n, 3), dtype=np.float64)
+    sem = np.zeros(n, dtype=np.int64)
+    inst = np.full(n, -1, dtype=np.int64)
+    scores = np.zeros(n, dtype=np.float32)
+
+    for i in range(n):
+        r = rows[i]
+        xyz[i, 0] = float(r[col['x']]) + mean_x
+        xyz[i, 1] = float(r[col['y']]) + mean_y
+        xyz[i, 2] = float(r[col['z']]) + zmin
+        if 'semantic_pred' in col:
+            sem[i] = int(r[col['semantic_pred']])
+        if 'instance_pred' in col:
+            inst[i] = int(r[col['instance_pred']])
+        if 'score' in col:
+            scores[i] = float(r[col['score']])
+
+    _save_result_ply(preview_path, xyz, sem, inst, scores)
+
+
 def _save_result_ply(path, xyz, semantic, instance, scores):
     """Write merged result to PLY file (vectorized, fast for millions of points)."""
     N = len(xyz)
@@ -410,10 +455,21 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, tile_siz
                           capture_output=True, text=True)
             dt = round(time.time() - t0, 1)
 
-            # Check for output PLY
+            # Check for output PLY and generate preview with original coordinates
             result_ply = os.path.join(tile['tile_dir'], f'{tile["tile_name"]}.ply')
             if os.path.exists(result_ply):
                 _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: done in {dt}s")
+                # Generate preview PLY with original coordinates for incremental viewer
+                try:
+                    _generate_tile_preview(result_ply, tile['offsets'],
+                                           os.path.join(task_dir, f'tile_{i}_preview.ply'))
+                except Exception as pe:
+                    _log_task(task_id, t_start, f"  Preview generation failed: {pe}")
+                _update_task_progress(task_id, 'inferring', progress=progress,
+                                      stats={'n_original': N, 'n_processed': N,
+                                             'n_tiles': n_tiles, 'current_tile': i + 1,
+                                             'tile_points': tile['n_points']},
+                                      completed_tiles=i + 1)
             else:
                 _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: no PLY output (exit={proc.returncode})")
                 if proc.stderr:
@@ -711,9 +767,11 @@ def task_status(task_id: str):
     if task['status'] == 'processing':
         result['hw'] = _get_gpu_utilization()
         result['stats'] = task.get('stats', {})
+        result['completed_tiles'] = task.get('completed_tiles', 0)
 
     if task['status'] == 'completed':
         result['stats'] = task.get('stats', {})
+        result['completed_tiles'] = task.get('completed_tiles', 0)
         result['download_url'] = f'/result/{task_id}/ply'
         result['json_url'] = f'/result/{task_id}/json'
 
@@ -721,6 +779,19 @@ def task_status(task_id: str):
         result['error'] = task.get('error', 'Unknown error')
 
     return JSONResponse(result)
+
+
+@app.get("/task/{task_id}/tile/{tile_idx}")
+def get_tile_preview(task_id: str, tile_idx: int):
+    """Get a completed tile's preview PLY (original coordinates) for incremental rendering."""
+    if task_id not in tasks:
+        raise HTTPException(404, "Task not found")
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    preview_path = os.path.join(task_dir, f'tile_{tile_idx}_preview.ply')
+    if not os.path.exists(preview_path):
+        raise HTTPException(404, f"Tile {tile_idx} not ready yet")
+    return FileResponse(preview_path, media_type='text/plain',
+                        headers={'Cache-Control': 'no-cache'})
 
 
 
