@@ -371,10 +371,27 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
                 result = engine.predict(tile_xyz, output_ply_path=tile_ply)
                 tile_results.append(result)
 
+                # Save tile PLY with original coordinates for streaming preview
+                tile_preview = os.path.join(task_dir, f'tile_{i}_preview.ply')
+                sem = result.get('semantic_pred')
+                inst = result.get('instance_pred')
+                scr = result.get('instance_scores')
+                _save_result_ply(tile_preview, tile_xyz,
+                                 sem if sem is not None else np.zeros(tile_n, dtype=np.int64),
+                                 inst if inst is not None else np.full(tile_n, -1, dtype=np.int64),
+                                 scr if scr is not None else np.zeros(tile_n, dtype=np.float32))
+
                 tile_trees = 0
-                if result.get('instance_pred') is not None:
-                    tile_trees = len(set(result['instance_pred'][result['instance_pred'] >= 0]))
+                if inst is not None:
+                    tile_trees = len(set(inst[inst >= 0]))
                 _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile_trees} trees found")
+
+                # Mark tile as available for streaming preview
+                _update_task_progress(task_id, 'inferring', progress=progress,
+                                      stats={'n_original': n_original, 'n_processed': n_subsampled,
+                                             'n_tiles': n_tiles, 'current_tile': i + 1,
+                                             'tile_points': tile_n},
+                                      completed_tiles=i + 1)
             except Exception as tile_err:
                 _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles} failed: {tile_err}")
                 tile_results.append(None)
@@ -391,11 +408,12 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
         output_ply = os.path.join(task_dir, 'result.ply')
         _save_result_ply(output_ply, xyz, semantic, instance, scores)
 
-        # Clean up temporary tile PLY files
+        # Clean up temporary tile PLY files (keep preview files until task is deleted)
         for i in range(n_tiles):
             tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
             if os.path.exists(tile_ply):
                 os.remove(tile_ply)
+            # Preview PLY files are cleaned up when task is deleted
 
         # Stats
         stats = {
@@ -616,12 +634,15 @@ def task_status(task_id: str):
         'elapsed': round(time.time() - task.get('created', time.time()), 1),
     }
 
-    # Include real-time GPU/system stats for active tasks
+    # Include real-time GPU/system stats and tile progress for active tasks
     if task['status'] == 'processing':
         result['hw'] = _get_gpu_utilization()
+        result['completed_tiles'] = task.get('completed_tiles', 0)
+        result['stats'] = task.get('stats', {})
 
     if task['status'] == 'completed':
         result['stats'] = task.get('stats', {})
+        result['completed_tiles'] = task.get('completed_tiles', 0)
         result['download_url'] = f'/result/{task_id}/ply'
         result['json_url'] = f'/result/{task_id}/json'
 
@@ -629,6 +650,21 @@ def task_status(task_id: str):
         result['error'] = task.get('error', 'Unknown error')
 
     return JSONResponse(result)
+
+
+@app.get("/task/{task_id}/tile/{tile_idx}")
+def get_tile_preview(task_id: str, tile_idx: int):
+    """Get a completed tile's PLY for progressive rendering."""
+    if task_id not in tasks:
+        raise HTTPException(404, "Task not found")
+
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    tile_path = os.path.join(task_dir, f'tile_{tile_idx}_preview.ply')
+    if not os.path.exists(tile_path):
+        raise HTTPException(404, f"Tile {tile_idx} not ready yet")
+
+    return FileResponse(tile_path, media_type='text/plain',
+                        headers={'Cache-Control': 'no-cache'})
 
 
 @app.delete("/task/{task_id}")

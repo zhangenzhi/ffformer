@@ -415,6 +415,8 @@ let isDrag=false, isPan=false, lx=0, ly=0;
 let currentPlyData = null;
 let R = 1;
 let pollingTimers = {};  // task_id -> interval id
+let loadedTiles = {};    // task_id -> number of tiles already rendered in viewer
+let tileMeshes = [];     // THREE.Points meshes for progressive tile rendering
 let currentTab = 'results';
 
 // ==================== UPLOAD ====================
@@ -566,6 +568,15 @@ function startPolling(taskId) {
         updateHardwareFromPoll(data.hw);
       }
 
+      // Progressive tile rendering: load new tiles as they complete
+      if (data.completed_tiles && data.completed_tiles > (loadedTiles[taskId] || 0)) {
+        const from = loadedTiles[taskId] || 0;
+        for (let t = from; t < data.completed_tiles; t++) {
+          loadTilePreview(taskId, t);
+        }
+        loadedTiles[taskId] = data.completed_tiles;
+      }
+
       if (data.status === 'completed') {
         clearInterval(pollingTimers[taskId]);
         delete pollingTimers[taskId];
@@ -596,6 +607,8 @@ function startPolling(taskId) {
 uploadBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
   uploadBtn.disabled = true;
+  clearTileMeshes();
+  loadedTiles = {};
 
   // Show progress immediately
   progressContainer.classList.add('show');
@@ -792,6 +805,7 @@ function renderTaskList() {
 async function selectTask(tid) {
   activeTaskId = tid;
   renderTaskList();
+  clearTileMeshes();  // Clear progressive tiles before loading final result
 
   const t = taskData[tid];
   if (!t || t.status !== 'completed') return;
@@ -1532,6 +1546,93 @@ function updateHardwareFromPoll(hw) {
   el.innerHTML = html;
   // Also set status to busy
   document.getElementById('statusDot').className = 'dot busy';
+}
+
+// ==================== PROGRESSIVE TILE RENDERING ====================
+function clearTileMeshes() {
+  for (const m of tileMeshes) {
+    scene.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+  }
+  tileMeshes = [];
+}
+
+async function loadTilePreview(taskId, tileIdx) {
+  try {
+    const resp = await fetch(`${API}/task/${taskId}/tile/${tileIdx}`);
+    if (!resp.ok) return;
+    const text = await resp.text();
+
+    // Parse PLY
+    const lines = text.split('\n');
+    let headerEnd = 0, nVerts = 0;
+    const col = {};
+    let fieldIdx = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith('element vertex')) nVerts = parseInt(line.split(' ')[2]);
+      if (line.startsWith('property')) {
+        const name = line.split(' ').pop();
+        col[name] = fieldIdx++;
+      }
+      if (line === 'end_header') { headerEnd = i + 1; break; }
+    }
+    if (nVerts === 0) return;
+
+    const pos = new Float32Array(nVerts * 3);
+    const colors = new Float32Array(nVerts * 3);
+    let cx = 0, cy = 0, cz = 0;
+
+    for (let i = 0; i < nVerts; i++) {
+      const vals = lines[headerEnd + i].trim().split(/\s+/);
+      const x = parseFloat(vals[col.x]), y = parseFloat(vals[col.y]), z = parseFloat(vals[col.z]);
+      pos[i*3] = x; pos[i*3+1] = y; pos[i*3+2] = z;
+      cx += x; cy += y; cz += z;
+
+      // Color by instance
+      const inst = col.instance_pred != null ? parseInt(vals[col.instance_pred] || '-1') : -1;
+      const c = inst >= 0 ? INST_COLORS[inst % INST_COLORS.length] : UNASSIGNED;
+      colors[i*3] = c[0]/255; colors[i*3+1] = c[1]/255; colors[i*3+2] = c[2]/255;
+    }
+
+    // First tile: initialize viewer and set camera
+    if (tileMeshes.length === 0) {
+      // Show viewer
+      document.getElementById('viewerEmpty').style.display = 'none';
+      document.getElementById('viewer3d').style.display = 'block';
+      document.getElementById('viewerToolbar').style.display = 'block';
+      if (pointsMesh) { scene.remove(pointsMesh); pointsMesh = null; }
+
+      // Set center from first tile
+      cx /= nVerts; cy /= nVerts; cz /= nVerts;
+      camTarget.set(cx, cy, cz);
+      R = 50; // reasonable initial radius for tiled data
+      spherical.radius = R * 2.8;
+      spherical.theta = -Math.PI/2;
+      spherical.phi = Math.PI/3;
+      updateCam();
+      onResize();
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({
+      size: 0.3, vertexColors: true, sizeAttenuation: true
+    });
+    const mesh = new THREE.Points(geo, mat);
+    scene.add(mesh);
+    tileMeshes.push(mesh);
+
+    // Update info bar
+    const totalPts = tileMeshes.reduce((s, m) => s + m.geometry.attributes.position.count, 0);
+    document.getElementById('infoPoints').textContent = `${totalPts.toLocaleString()} pts (${tileMeshes.length} tiles)`;
+    document.getElementById('infoBar').style.display = 'flex';
+
+  } catch (e) {
+    console.warn(`Failed to load tile ${tileIdx}:`, e);
+  }
 }
 
 // ==================== INIT ====================
