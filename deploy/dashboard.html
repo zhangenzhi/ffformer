@@ -57,31 +57,28 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
 .btn-primary:hover { background:#2ea043; }
 .btn-primary:disabled { background:var(--bg3); color:var(--text2); cursor:not-allowed; }
 
-/* Progress bar with steps */
+/* Progress: segmented stage bars */
 .progress-container { margin-top:10px; display:none; }
 .progress-container.show { display:block; }
-.progress-step-label { font-size:11px; color:var(--accent); margin-bottom:4px;
+.progress-header { font-size:11px; color:var(--accent); margin-bottom:6px;
   display:flex; justify-content:space-between; align-items:center; }
-.progress-step-label .elapsed { color:var(--text2); font-size:10px; }
-.progress { height:4px; background:var(--bg3); border-radius:2px; overflow:hidden; }
-.progress .bar { height:100%; background:var(--accent); border-radius:2px;
-  transition:width 0.4s ease; }
-.progress .bar.indeterminate { width:30%!important;
-  animation:indeterminate 1.5s ease-in-out infinite; }
-@keyframes indeterminate {
-  0% { margin-left:0; }
-  50% { margin-left:70%; }
-  100% { margin-left:0; }
-}
-.progress-steps { display:flex; justify-content:space-between; margin-top:6px; }
-.progress-steps .step { font-size:9px; color:var(--text2); text-align:center; flex:1;
-  position:relative; padding-top:10px; }
-.progress-steps .step::before { content:''; position:absolute; top:0; left:50%;
-  transform:translateX(-50%); width:6px; height:6px; border-radius:50%;
-  background:var(--bg3); border:1px solid var(--border); }
-.progress-steps .step.done::before { background:var(--green); border-color:var(--green); }
-.progress-steps .step.active::before { background:var(--accent); border-color:var(--accent);
-  box-shadow:0 0 6px var(--accent); }
+.progress-header .elapsed { color:var(--text2); font-size:10px; }
+.progress-stages { display:flex; flex-direction:column; gap:4px; }
+.stage { display:grid; grid-template-columns:70px 1fr 46px; gap:6px; align-items:center;
+  font-size:10px; height:16px; }
+.stage-name { color:var(--text2); font-weight:600; white-space:nowrap; overflow:hidden; }
+.stage.active .stage-name { color:var(--accent); }
+.stage.done .stage-name { color:var(--green); }
+.stage-bar { height:4px; background:var(--bg3); border-radius:2px; overflow:hidden; }
+.stage-bar-fill { height:100%; border-radius:2px; transition:width 0.4s ease; }
+.stage.pending .stage-bar-fill { width:0; background:var(--bg3); }
+.stage.active .stage-bar-fill { background:var(--accent); }
+.stage.done .stage-bar-fill { width:100%!important; background:var(--green); }
+.stage-time { color:var(--text2); font-size:9px; text-align:right; font-variant-numeric:tabular-nums; }
+.stage.active .stage-time { color:var(--accent); }
+.stage.done .stage-time { color:var(--green); }
+@keyframes stagePulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+.stage.active .stage-bar-fill { animation:stagePulse 1.5s ease-in-out infinite; }
 
 /* Sidebar tabs */
 .sidebar-tabs { display:flex; border-bottom:1px solid var(--border); }
@@ -298,18 +295,12 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
       </div>
       <button class="btn btn-primary" id="uploadBtn" disabled>Upload & Process</button>
       <div class="progress-container" id="progressContainer">
-        <div class="progress-step-label">
+        <div class="progress-header">
           <span id="progressLabel">Uploading...</span>
           <span class="elapsed" id="progressElapsed">0.0s</span>
         </div>
-        <div class="progress"><div class="bar" id="progressBar" style="width:0%"></div></div>
-        <div class="progress-detail" id="progressDetail" style="font-size:10px;color:#8b949e;margin:4px 0;text-align:center;display:none"></div>
-        <div class="progress-steps">
-          <div class="step" id="stepRead">Read</div>
-          <div class="step" id="stepSubsample">Subsample</div>
-          <div class="step" id="stepInfer">Infer</div>
-          <div class="step" id="stepSave">Save</div>
-        </div>
+        <div class="progress-detail" id="progressDetail" style="font-size:10px;color:#8b949e;margin:0 0 6px;text-align:center;display:none"></div>
+        <div class="progress-stages" id="progressStages"></div>
       </div>
     </div>
 
@@ -424,7 +415,6 @@ const dropArea = document.getElementById('dropArea');
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
 const progressContainer = document.getElementById('progressContainer');
-const progressBar = document.getElementById('progressBar');
 const progressLabel = document.getElementById('progressLabel');
 const progressElapsed = document.getElementById('progressElapsed');
 
@@ -447,97 +437,101 @@ function selectFile(f) {
 }
 
 // Step order for progress tracking
-const STEP_ORDER = ['uploading', 'reading', 'subsampling', 'splitting', 'inferring', 'merging', 'saving', 'tiling', 'completed'];
-const STEP_MAP = {
-  'uploading': [],
-  'reading': ['stepRead'],
-  'subsampling': ['stepRead', 'stepSubsample'],
-  'splitting': ['stepRead', 'stepSubsample'],
-  'inferring': ['stepRead', 'stepSubsample', 'stepInfer'],
-  'merging': ['stepRead', 'stepSubsample', 'stepInfer'],
-  'saving': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
-  'tiling': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
-  'completed': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
-};
-const STEP_ACTIVE = {
-  'uploading': null,
-  'reading': 'stepRead',
-  'subsampling': 'stepSubsample',
-  'splitting': 'stepSubsample',
-  'inferring': 'stepInfer',
-  'merging': 'stepInfer',
-  'saving': 'stepSave',
-  'tiling': 'stepSave',
-  'completed': null,
-};
+// Visible pipeline stages (order matters)
+const VISIBLE_STAGES = [
+  {key:'reading',     label:'Read'},
+  {key:'subsampling', label:'Subsample'},
+  {key:'splitting',   label:'Split'},
+  {key:'inferring',   label:'Infer'},
+  {key:'merging',     label:'Merge'},
+  {key:'saving',      label:'Save'},
+  {key:'tiling',      label:'Tiles'},
+];
+
+function fmtDuration(sec) {
+  if (sec == null) return '';
+  if (sec < 60) return sec.toFixed(1) + 's';
+  const m = Math.floor(sec / 60);
+  const s = (sec % 60).toFixed(0);
+  return `${m}m${s}s`;
+}
 
 function updateProgressUI(data) {
   const step = data.step || 'uploading';
-  const pct = data.progress || 0;
   const elapsed = data.elapsed || 0;
+  const stats = data.stats || {};
+  const stepTimes = data.step_times || {};
+  const now = Date.now() / 1000;
 
+  // Header label
   let label = data.step_label || step;
-  if (step === 'inferring' && (data.stats||{}).n_tiles > 1) {
-    label = `Inferring tile ${(data.stats||{}).current_tile||'?'}/${data.stats.n_tiles}`;
+  if (step === 'inferring' && stats.n_tiles > 1) {
+    label = `Inferring tile ${stats.current_tile||'?'}/${stats.n_tiles}`;
   }
   progressLabel.textContent = label;
-  progressBar.style.width = pct + '%';
-  progressBar.classList.toggle('indeterminate', false);
-  progressElapsed.textContent = elapsed.toFixed(1) + 's';
+  progressElapsed.textContent = fmtDuration(elapsed);
 
-  // Show detail info: speed, points, ETA
+  // Detail line
   const detail = document.getElementById('progressDetail');
-  const stats = data.stats || {};
   let detailText = '';
-  if (step === 'reading' || step === 'subsampling') {
-    const pts = stats.n_original || stats.n_points || 0;
-    if (pts > 0) detailText = pts.toLocaleString() + ' points loaded';
-  } else if (step === 'splitting') {
-    const tiles = stats.n_tiles || 0;
-    const pts = stats.n_processed || 0;
-    if (tiles > 0) detailText = `${pts.toLocaleString()} pts → ${tiles} tiles (${stats.tile_size||30}m)`;
-    else if (pts > 0) detailText = pts.toLocaleString() + ' points, splitting...';
-  } else if (step === 'inferring') {
-    const tile = stats.current_tile || 0;
-    const total = stats.n_tiles || 1;
-    const tilePts = stats.tile_points || 0;
-    if (total > 1) {
-      detailText = `Tile ${tile}/${total} · ${tilePts.toLocaleString()} pts`;
-    } else {
-      const pts = stats.n_processed || 0;
-      if (pts > 0) detailText = pts.toLocaleString() + ' points processing';
+  if (step === 'inferring' && stats.n_tiles > 1) {
+    detailText = `${(stats.tile_points||0).toLocaleString()} pts`;
+    if (elapsed > 0 && data.progress > 0 && data.progress < 100) {
+      const eta = (elapsed / data.progress * (100 - data.progress));
+      detailText += ` · ETA ~${fmtDuration(eta)}`;
     }
-    if (elapsed > 0 && pct > 0 && pct < 100) {
-      const eta = (elapsed / pct * (100 - pct)).toFixed(0);
-      detailText += ` · ETA ~${eta}s`;
-    }
-  } else if (step === 'merging') {
-    detailText = 'Merging tile predictions...';
-  } else if (step === 'tiling') {
-    detailText = 'Building streaming viewer tiles...';
   } else if (step === 'completed') {
-    const trees = stats.n_trees || 0;
-    const pts = stats.n_original || 0;
-    const infTime = stats.inference_time || 0;
-    detailText = `${trees} trees · ${pts.toLocaleString()} pts · ${infTime.toFixed(1)}s inference`;
+    detailText = `${stats.n_trees||0} trees · ${(stats.n_processed||0).toLocaleString()} pts`;
   }
   detail.textContent = detailText;
   detail.style.display = detailText ? 'block' : 'none';
 
-  // Update step dots
-  const doneSteps = STEP_MAP[step] || [];
-  const activeStep = STEP_ACTIVE[step] || null;
-  ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'].forEach(id => {
-    const el = document.getElementById(id);
-    el.classList.remove('done', 'active');
-    if (step === 'completed' || doneSteps.includes(id)) {
-      el.classList.add('done');
+  // Build stage bars
+  const container = document.getElementById('progressStages');
+  const stageOrder = VISIBLE_STAGES.map(s => s.key);
+  const currentIdx = stageOrder.indexOf(step);
+
+  let html = '';
+  for (let i = 0; i < VISIBLE_STAGES.length; i++) {
+    const s = VISIBLE_STAGES[i];
+    const st = stepTimes[s.key];
+    let state, barPct, timeStr;
+
+    if (step === 'completed' || i < currentIdx) {
+      // Done
+      state = 'done';
+      barPct = 100;
+      timeStr = st ? fmtDuration(st.duration) : '';
+    } else if (i === currentIdx) {
+      // Active
+      state = 'active';
+      if (s.key === 'inferring' && stats.n_tiles > 1) {
+        barPct = Math.round(((stats.current_tile || 1) - 1) / stats.n_tiles * 100);
+      } else {
+        barPct = 50; // indeterminate-ish for active non-tile stages
+      }
+      // Live elapsed for active step
+      timeStr = st ? fmtDuration(now - st.start) : '';
+    } else {
+      // Pending
+      state = 'pending';
+      barPct = 0;
+      timeStr = '';
     }
-    if (id === activeStep) {
-      el.classList.remove('done');
-      el.classList.add('active');
+
+    // Infer stage: show tile sub-label
+    let nameLabel = s.label;
+    if (s.key === 'inferring' && stats.n_tiles > 1 && state === 'active') {
+      nameLabel = `Infer ${stats.current_tile||'?'}/${stats.n_tiles}`;
     }
-  });
+
+    html += `<div class="stage ${state}">
+      <div class="stage-name">${nameLabel}</div>
+      <div class="stage-bar"><div class="stage-bar-fill" style="width:${barPct}%"></div></div>
+      <div class="stage-time">${timeStr}</div>
+    </div>`;
+  }
+  container.innerHTML = html;
 }
 
 function startPolling(taskId) {
@@ -612,13 +606,10 @@ uploadBtn.addEventListener('click', async () => {
 
   // Show progress immediately
   progressContainer.classList.add('show');
-  progressBar.style.width = '0%';
-  progressBar.classList.remove('indeterminate');
   progressLabel.textContent = 'Uploading...';
   progressElapsed.textContent = '0.0s';
-  ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'].forEach(id => {
-    document.getElementById(id).classList.remove('done', 'active');
-  });
+  document.getElementById('progressStages').innerHTML = '';
+  document.getElementById('progressDetail').style.display = 'none';
 
   const formData = new FormData();
   formData.append('file', selectedFile);
@@ -634,14 +625,19 @@ uploadBtn.addEventListener('click', async () => {
       xhr.open('POST', `${API}/predict?subsample=${sub}&tile_size=${tileSize}`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
-          const pct = Math.round(e.loaded / e.total * 10); // 0-10% for upload phase
           const elapsed = (Date.now() - uploadStart) / 1000;
           const speed = e.loaded / elapsed;
           const eta = (e.total - e.loaded) / speed;
-          progressBar.style.width = pct + '%';
+          const pct = Math.round(e.loaded / e.total * 100);
           progressElapsed.textContent = elapsed.toFixed(1) + 's';
+          // Show upload as a stage
+          document.getElementById('progressStages').innerHTML = `<div class="stage active">
+            <div class="stage-name">Upload</div>
+            <div class="stage-bar"><div class="stage-bar-fill" style="width:${pct}%"></div></div>
+            <div class="stage-time">${(speed/1e6).toFixed(1)} MB/s</div>
+          </div>`;
           const detail = document.getElementById('progressDetail');
-          detail.textContent = `${(e.loaded/1e6).toFixed(0)}/${(e.total/1e6).toFixed(0)} MB · ${(speed/1e6).toFixed(1)} MB/s · ETA ${eta.toFixed(0)}s`;
+          detail.textContent = `${(e.loaded/1e6).toFixed(0)}/${(e.total/1e6).toFixed(0)} MB · ETA ${eta.toFixed(0)}s`;
           detail.style.display = 'block';
         }
       };
@@ -1301,13 +1297,10 @@ async function runDataInference(dataPath) {
 
   // Show progress
   progressContainer.classList.add('show');
-  progressBar.style.width = '0%';
-  progressBar.classList.remove('indeterminate');
   progressLabel.textContent = 'Starting...';
   progressElapsed.textContent = '0.0s';
-  ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'].forEach(id => {
-    document.getElementById(id).classList.remove('done', 'active');
-  });
+  document.getElementById('progressStages').innerHTML = '';
+  document.getElementById('progressDetail').style.display = 'none';
   uploadBtn.disabled = true;
 
   try {

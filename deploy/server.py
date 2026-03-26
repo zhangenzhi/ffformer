@@ -160,10 +160,25 @@ def _update_task_progress(task_id, step, progress=None, **extra):
     if task_id not in tasks:
         return
     t = dict(tasks[task_id])  # copy from Manager proxy
+    now = time.time()
+
+    # Track per-step timing
+    step_times = dict(t.get('step_times', {}))
+    prev_step = t.get('step')
+    if prev_step and prev_step != step and prev_step in step_times:
+        # Close out previous step
+        st = dict(step_times[prev_step])
+        st['end'] = now
+        st['duration'] = round(now - st['start'], 1)
+        step_times[prev_step] = st
+    if step not in step_times:
+        step_times[step] = {'start': now, 'end': None, 'duration': None}
+    t['step_times'] = step_times
+
     t['step'] = step
     t['step_label'] = STEP_NAMES.get(step, step)
     t['progress'] = progress if progress is not None else STEP_PROGRESS.get(step, 0)
-    t['updated'] = time.time()
+    t['updated'] = now
     if step in ('completed', 'failed'):
         t['status'] = step
     else:
@@ -616,6 +631,7 @@ def task_status(task_id: str):
         raise HTTPException(404, "Task not found")
 
     task = tasks[task_id]
+    now = time.time()
     result = {
         'task_id': task_id,
         'status': task['status'],
@@ -623,7 +639,8 @@ def task_status(task_id: str):
         'step_label': task.get('step_label', ''),
         'progress': task.get('progress', 0),
         'filename': task.get('filename', ''),
-        'elapsed': round(time.time() - task.get('created', time.time()), 1),
+        'elapsed': round(now - task.get('created', now), 1),
+        'step_times': task.get('step_times', {}),
     }
 
     # Include real-time GPU/system stats and tile progress for active tasks
