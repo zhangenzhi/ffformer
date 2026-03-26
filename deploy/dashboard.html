@@ -26,6 +26,8 @@ header .dot { width:8px; height:8px; border-radius:50%; display:inline-block;
   margin-right:4px; vertical-align:middle; }
 header .dot.on { background:var(--green); }
 header .dot.off { background:var(--red); }
+header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
 /* Layout */
 .main { flex:1; display:flex; overflow:hidden; }
@@ -164,7 +166,7 @@ header .dot.off { background:var(--red); }
 .hw-panel { position:absolute; left:10px; top:10px; z-index:15;
   background:rgba(22,27,34,0.92); backdrop-filter:blur(6px);
   border:1px solid var(--border); border-radius:var(--radius);
-  padding:8px 12px; font-size:10px; max-width:220px; }
+  padding:8px 12px; font-size:10px; max-width:240px; min-width:200px; }
 .hw-title { font-size:9px; text-transform:uppercase; letter-spacing:0.8px;
   color:var(--text2); margin-bottom:4px; font-weight:600; }
 .hw-content { color:var(--text); line-height:1.6; }
@@ -173,6 +175,17 @@ header .dot.off { background:var(--red); }
 .hw-content .hw-val { font-weight:600; text-align:right; }
 .hw-gpu { color:var(--green); font-weight:700; }
 .hw-nogpu { color:var(--red); }
+.hw-section { margin-top:5px; padding-top:5px; border-top:1px solid rgba(255,255,255,0.06); }
+.hw-section-title { font-size:8px; text-transform:uppercase; letter-spacing:0.6px;
+  color:var(--text2); margin-bottom:3px; opacity:0.7; }
+.hw-bar { height:4px; background:var(--bg); border-radius:2px; margin:2px 0 4px; overflow:hidden; }
+.hw-bar-fill { height:100%; border-radius:2px; transition:width 0.6s ease; }
+.hw-bar-fill.green { background:var(--green); }
+.hw-bar-fill.orange { background:var(--orange); }
+.hw-bar-fill.red { background:var(--red); }
+.hw-bar-row { display:flex; justify-content:space-between; font-size:9px; }
+.hw-bar-row .hw-label { color:var(--text2); }
+.hw-bar-row .hw-val { font-weight:600; }
 
 /* Download buttons */
 .downloads { padding:12px 16px; border-top:1px solid var(--border); }
@@ -509,7 +522,7 @@ function startPolling(taskId) {
 
   pollingTimers[taskId] = setInterval(async () => {
     try {
-      const resp = await fetch(`${API}/task/${taskId}/status`);
+      const resp = await fetch(`${API}/task/${taskId}/status`, {signal: AbortSignal.timeout(30000)});
       const data = await resp.json();
 
       // Update task data
@@ -525,6 +538,11 @@ function startPolling(taskId) {
       }
 
       renderTaskList();
+
+      // Update hardware panel from task poll data when health check may be slow
+      if (data.hw) {
+        updateHardwareFromPoll(data.hw);
+      }
 
       if (data.status === 'completed') {
         clearInterval(pollingTimers[taskId]);
@@ -548,9 +566,9 @@ function startPolling(taskId) {
         alert('Processing failed: ' + (data.error || 'Unknown error'));
       }
     } catch (e) {
-      console.error('Polling error:', e);
+      console.warn('Polling timeout (server busy), will retry...', e.message);
     }
-  }, 1000);
+  }, 3000);
 }
 
 uploadBtn.addEventListener('click', async () => {
@@ -1370,19 +1388,43 @@ async function refreshFilesGrouped() {
 }
 
 // ==================== HEALTH CHECK ====================
+function hasActiveTasks() {
+  return Object.keys(pollingTimers).length > 0;
+}
+
 async function checkHealth() {
+  // Use longer timeout when tasks are running (server is busy with inference)
+  const timeout = hasActiveTasks() ? 30000 : 5000;
   try {
-    const resp = await fetch(`${API}/health`, {signal: AbortSignal.timeout(3000)});
+    const resp = await fetch(`${API}/health`, {signal: AbortSignal.timeout(timeout)});
     const data = await resp.json();
     document.getElementById('statusDot').className = 'dot on';
     document.getElementById('statusText').textContent =
       `GPU Ready${data.model_loaded ? ' · Model Loaded' : ''}`;
     updateHardwarePanel(data);
   } catch(e) {
-    document.getElementById('statusDot').className = 'dot off';
-    document.getElementById('statusText').textContent = 'Server Offline';
-    document.getElementById('hwContent').textContent = 'Server offline';
+    if (hasActiveTasks()) {
+      // Server is busy processing — not offline
+      document.getElementById('statusDot').className = 'dot busy';
+      document.getElementById('statusText').textContent = 'Processing (server busy)';
+      document.getElementById('hwContent').innerHTML =
+        '<div style="color:var(--orange)">Server busy — inference running</div>';
+    } else {
+      document.getElementById('statusDot').className = 'dot off';
+      document.getElementById('statusText').textContent = 'Server Offline';
+      document.getElementById('hwContent').textContent = 'Server offline';
+    }
   }
+}
+
+function barColor(pct) {
+  return pct > 85 ? 'red' : pct > 50 ? 'orange' : 'green';
+}
+
+function utilBar(label, pct, detail) {
+  const p = Math.min(100, Math.max(0, pct || 0));
+  return `<div class="hw-bar-row"><span class="hw-label">${label}</span><span class="hw-val">${detail || p.toFixed(0)+'%'}</span></div>` +
+    `<div class="hw-bar"><div class="hw-bar-fill ${barColor(p)}" style="width:${p}%"></div></div>`;
 }
 
 function updateHardwarePanel(data) {
@@ -1393,31 +1435,81 @@ function updateHardwarePanel(data) {
   if (data.gpu_available && data.gpu) {
     const g = data.gpu;
     html += `<div class="hw-gpu">${g.name}</div>`;
-    html += row('VRAM', g.memory_total_gb + ' GB');
-    html += row('GPU Count', g.count);
-    html += row('CUDA', g.cuda_version);
+    html += row('CUDA', g.cuda_version + ' · ×' + g.count);
+
+    // GPU utilization bars
+    html += '<div class="hw-section"><div class="hw-section-title">Utilization</div>';
+    if (g.utilization_pct != null) {
+      html += utilBar('GPU', g.utilization_pct);
+    }
+    const vramPct = g.memory_used_pct || (g.memory_reserved_gb / g.memory_total_gb * 100);
+    const vramDetail = (g.memory_reserved_gb || 0).toFixed(1) + ' / ' + g.memory_total_gb + ' GB';
+    html += utilBar('VRAM', vramPct, vramDetail);
+    if (g.temperature_c != null) {
+      html += row('Temp', g.temperature_c + ' °C');
+    }
+    if (g.power_w != null) {
+      html += row('Power', g.power_w.toFixed(0) + ' / ' + g.power_limit_w.toFixed(0) + ' W');
+    }
+    html += '</div>';
   } else {
     html += '<div class="hw-nogpu">No GPU</div>';
   }
 
   if (data.system) {
     const s = data.system;
-    if (s.ram_total_gb) html += row('RAM', s.ram_total_gb + ' / ' + (s.ram_used_gb || '?') + ' GB');
-    html += row('CPU', s.cpu_count + ' cores');
+    html += '<div class="hw-section"><div class="hw-section-title">System</div>';
+    if (s.cpu_used_pct != null) {
+      html += utilBar('CPU', s.cpu_used_pct, s.cpu_used_pct.toFixed(0) + '% · ' + s.cpu_count + ' cores');
+    } else {
+      html += row('CPU', s.cpu_count + ' cores');
+    }
+    if (s.ram_total_gb) {
+      const ramPct = s.ram_used_pct || (s.ram_used_gb / s.ram_total_gb * 100);
+      html += utilBar('RAM', ramPct, (s.ram_used_gb||0).toFixed(1) + ' / ' + s.ram_total_gb + ' GB');
+    }
+    html += '</div>';
   }
-
-  if (data.torch) html += row('PyTorch', data.torch);
 
   if (data.checkpoint) {
+    html += '<div class="hw-section">';
     html += row('Model', data.checkpoint.filename);
     html += row('Size', data.checkpoint.size_mb + ' MB');
+    html += row('Status', data.model_loaded
+      ? '<span style="color:var(--green)">Loaded</span>'
+      : '<span style="color:var(--orange)">Idle</span>');
+    html += '</div>';
   }
 
-  html += row('Status', data.model_loaded
-    ? '<span style="color:var(--green)">Loaded</span>'
-    : '<span style="color:var(--orange)">Idle</span>');
+  el.innerHTML = html;
+}
+
+// Update hardware panel from lightweight task poll data (works even when /health is slow)
+function updateHardwareFromPoll(hw) {
+  const el = document.getElementById('hwContent');
+  const row = (label, val) => `<div class="hw-row"><span class="hw-label">${label}</span><span class="hw-val">${val}</span></div>`;
+  let html = '<div class="hw-section-title" style="color:var(--orange)">Live · Inference Running</div>';
+
+  if (hw.gpu_util_pct != null) {
+    html += utilBar('GPU', hw.gpu_util_pct);
+  }
+  if (hw.vram_total_gb) {
+    const vramPct = (hw.vram_reserved_gb / hw.vram_total_gb * 100);
+    html += utilBar('VRAM', vramPct, hw.vram_reserved_gb.toFixed(1) + ' / ' + hw.vram_total_gb + ' GB');
+  }
+  if (hw.temp_c != null) {
+    html += row('Temp', hw.temp_c + ' °C');
+  }
+  if (hw.cpu_used_pct != null) {
+    html += utilBar('CPU', hw.cpu_used_pct);
+  }
+  if (hw.ram_used_pct != null) {
+    html += utilBar('RAM', hw.ram_used_pct);
+  }
 
   el.innerHTML = html;
+  // Also set status to busy
+  document.getElementById('statusDot').className = 'dot busy';
 }
 
 // ==================== INIT ====================

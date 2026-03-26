@@ -104,6 +104,40 @@ STEP_NAMES = {s[0]: s[1] for s in PROGRESS_STEPS}
 STEP_PROGRESS = {s[0]: s[2] for s in PROGRESS_STEPS}
 
 
+def _get_gpu_utilization():
+    """Get real-time GPU utilization (lightweight, no GIL issues)."""
+    stats = {}
+    try:
+        import torch
+        if torch.cuda.is_available():
+            stats['vram_allocated_gb'] = round(torch.cuda.memory_allocated(0) / 1e9, 2)
+            stats['vram_reserved_gb'] = round(torch.cuda.memory_reserved(0) / 1e9, 2)
+            stats['vram_total_gb'] = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
+    except Exception:
+        pass
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,temperature.gpu',
+             '--format=csv,noheader,nounits', '-i', '0'],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(',')]
+            stats['gpu_util_pct'] = float(parts[0])
+            stats['mem_util_pct'] = float(parts[1])
+            stats['temp_c'] = float(parts[2])
+    except Exception:
+        pass
+    try:
+        import psutil
+        stats['ram_used_pct'] = round(psutil.virtual_memory().percent, 1)
+        stats['cpu_used_pct'] = round(psutil.cpu_percent(interval=0), 1)
+    except Exception:
+        pass
+    return stats
+
+
 def _update_task_progress(task_id, step, progress=None, **extra):
     """Update task progress atomically."""
     if task_id not in tasks:
@@ -265,12 +299,36 @@ def health():
         info["gpu_available"] = torch.cuda.is_available()
         info["torch"] = torch.__version__
         if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            mem_total = props.total_memory
+            mem_reserved = torch.cuda.memory_reserved(0)
+            mem_allocated = torch.cuda.memory_allocated(0)
             info["gpu"] = {
                 "name": torch.cuda.get_device_name(0),
                 "count": torch.cuda.device_count(),
-                "memory_total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1),
+                "memory_total_gb": round(mem_total / 1e9, 1),
+                "memory_reserved_gb": round(mem_reserved / 1e9, 1),
+                "memory_allocated_gb": round(mem_allocated / 1e9, 1),
+                "memory_used_pct": round(mem_reserved / mem_total * 100, 1) if mem_total else 0,
                 "cuda_version": torch.version.cuda,
             }
+            # GPU utilization via nvidia-smi (works even during inference)
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit',
+                     '--format=csv,noheader,nounits', '-i', '0'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    parts = [p.strip() for p in result.stdout.strip().split(',')]
+                    info["gpu"]["utilization_pct"] = float(parts[0])
+                    info["gpu"]["memory_util_pct"] = float(parts[1])
+                    info["gpu"]["temperature_c"] = float(parts[2])
+                    info["gpu"]["power_w"] = float(parts[3])
+                    info["gpu"]["power_limit_w"] = float(parts[4])
+            except Exception:
+                pass
     except ImportError:
         pass
     try:
@@ -278,6 +336,8 @@ def health():
         mem = psutil.virtual_memory()
         info["system"]["ram_total_gb"] = round(mem.total / 1e9, 1)
         info["system"]["ram_used_gb"] = round(mem.used / 1e9, 1)
+        info["system"]["ram_used_pct"] = round(mem.percent, 1)
+        info["system"]["cpu_used_pct"] = round(psutil.cpu_percent(interval=0), 1)
     except ImportError:
         pass
     # Checkpoint info
@@ -372,6 +432,10 @@ def task_status(task_id: str):
         'filename': task.get('filename', ''),
         'elapsed': round(time.time() - task.get('created', time.time()), 1),
     }
+
+    # Include real-time GPU/system stats for active tasks
+    if task['status'] == 'processing':
+        result['hw'] = _get_gpu_utilization()
 
     if task['status'] == 'completed':
         result['stats'] = task.get('stats', {})
