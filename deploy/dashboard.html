@@ -404,7 +404,7 @@ const INST_COLORS = [
   [0,206,209],
 ];
 const SEM_COLORS = {0:[139,119,101], 1:[210,150,60], 2:[34,180,34]};
-const UNASSIGNED = [60,60,60];
+const UNASSIGNED = [80,80,80];
 
 // ==================== STATE ====================
 let selectedFile = null;
@@ -918,9 +918,13 @@ function initViewer() {
   document.getElementById('vPsize').oninput = function(){
     const v = this.value / 30.0;
     if(pointsMat) pointsMat.size = R*0.01*v;
-    // Also update streaming nodes
+    // Update streaming nodes
     for (const obj of Object.values(streamNodes)) {
       obj.material.size = Math.max(1.0, R * 0.02) * v;
+    }
+    // Update tile preview meshes
+    for (const m of tileMeshes) {
+      if (m.material.uniforms) m.material.uniforms.uSize.value = R * 0.010 * v;
     }
   };
   document.getElementById('vBg').onchange = function(){
@@ -1595,13 +1599,58 @@ function clearTileMeshes() {
   tileMeshes = [];
 }
 
+// Custom shader matching visualize_ply.py: circular points + depth shading + unassigned dim
+const _tileVertShader = `
+  attribute float flag;
+  uniform float uSize;
+  uniform float uDimAlpha;
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    vColor = color;
+    vAlpha = flag > 0.5 ? 1.0 : uDimAlpha;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = uSize * (350.0 / (-mv.z));
+    gl_PointSize = max(gl_PointSize, 1.0);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const _tileFragShader = `
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    vec2 p = gl_PointCoord - 0.5;
+    float d = dot(p, p);
+    if (d > 0.25) discard;
+    float edge = smoothstep(0.25, 0.15, d);
+    float shade = 1.0 - d * 0.5;
+    gl_FragColor = vec4(vColor * shade, vAlpha * edge);
+  }
+`;
+
+function colorTilePoints(vals, col, mode) {
+  // Returns [r, g, b] (0-1) and flag (1=assigned, 0=unassigned)
+  if (mode === 'semantic') {
+    const sem = col.semantic_pred != null ? parseInt(vals[col.semantic_pred] || '0') : 0;
+    const c = SEM_COLORS[sem] || UNASSIGNED;
+    return { r: c[0]/255, g: c[1]/255, b: c[2]/255, flag: c !== UNASSIGNED ? 1 : 0 };
+  }
+  // Default: instance
+  const inst = col.instance_pred != null ? parseInt(vals[col.instance_pred] || '-1') : -1;
+  if (inst >= 0) {
+    const c = INST_COLORS[inst % INST_COLORS.length];
+    return { r: c[0]/255, g: c[1]/255, b: c[2]/255, flag: 1 };
+  }
+  return { r: UNASSIGNED[0]/255, g: UNASSIGNED[1]/255, b: UNASSIGNED[2]/255, flag: 0 };
+}
+
 async function loadTilePreview(taskId, tileIdx) {
   try {
     const resp = await fetch(`${API}/task/${taskId}/tile/${tileIdx}`);
     if (!resp.ok) return;
     const text = await resp.text();
 
-    // Parse PLY
+    // Parse PLY header
     const lines = text.split('\n');
     let headerEnd = 0, nVerts = 0;
     const col = {};
@@ -1609,16 +1658,18 @@ async function loadTilePreview(taskId, tileIdx) {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (line.startsWith('element vertex')) nVerts = parseInt(line.split(' ')[2]);
-      if (line.startsWith('property')) {
-        const name = line.split(' ').pop();
-        col[name] = fieldIdx++;
-      }
+      if (line.startsWith('property')) { col[line.split(' ').pop()] = fieldIdx++; }
       if (line === 'end_header') { headerEnd = i + 1; break; }
     }
     if (nVerts === 0) return;
 
+    // Get current color mode from toolbar
+    const colorMode = document.getElementById('vColorMode')
+      ? document.getElementById('vColorMode').value : 'instance';
+
     const pos = new Float32Array(nVerts * 3);
     const colors = new Float32Array(nVerts * 3);
+    const flags = new Float32Array(nVerts);
     let cx = 0, cy = 0, cz = 0;
 
     for (let i = 0; i < nVerts; i++) {
@@ -1627,24 +1678,21 @@ async function loadTilePreview(taskId, tileIdx) {
       pos[i*3] = x; pos[i*3+1] = y; pos[i*3+2] = z;
       cx += x; cy += y; cz += z;
 
-      // Color by instance
-      const inst = col.instance_pred != null ? parseInt(vals[col.instance_pred] || '-1') : -1;
-      const c = inst >= 0 ? INST_COLORS[inst % INST_COLORS.length] : UNASSIGNED;
-      colors[i*3] = c[0]/255; colors[i*3+1] = c[1]/255; colors[i*3+2] = c[2]/255;
+      const c = colorTilePoints(vals, col, colorMode);
+      colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+      flags[i] = c.flag;
     }
 
     // First tile: initialize viewer and set camera
     if (tileMeshes.length === 0) {
-      // Show viewer
       document.getElementById('viewerEmpty').style.display = 'none';
       document.getElementById('viewer3d').style.display = 'block';
       document.getElementById('viewerToolbar').style.display = 'block';
       if (pointsMesh) { scene.remove(pointsMesh); pointsMesh = null; }
 
-      // Set center from first tile
       cx /= nVerts; cy /= nVerts; cz /= nVerts;
       camTarget.set(cx, cy, cz);
-      R = 50; // reasonable initial radius for tiled data
+      R = 50;
       spherical.radius = R * 2.8;
       spherical.theta = -Math.PI/2;
       spherical.phi = Math.PI/3;
@@ -1655,14 +1703,26 @@ async function loadTilePreview(taskId, tileIdx) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    const mat = new THREE.PointsMaterial({
-      size: 0.3, vertexColors: true, sizeAttenuation: true
+    geo.setAttribute('flag', new THREE.Float32BufferAttribute(flags, 1));
+
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uSize: { value: R * 0.010 },
+        uDimAlpha: { value: 0.12 },
+      },
+      vertexShader: _tileVertShader,
+      fragmentShader: _tileFragShader,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: true,
+      depthTest: true,
     });
+
     const mesh = new THREE.Points(geo, mat);
     scene.add(mesh);
     tileMeshes.push(mesh);
 
-    // Update info bar
+    // Update info bar with running totals
     const totalPts = tileMeshes.reduce((s, m) => s + m.geometry.attributes.position.count, 0);
     document.getElementById('infoPoints').textContent = `${totalPts.toLocaleString()} pts (${tileMeshes.length} tiles)`;
     document.getElementById('infoBar').style.display = 'flex';
