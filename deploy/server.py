@@ -213,13 +213,19 @@ def _log_task(task_id, t_start, message):
 
 
 def _voxel_subsample(xyz, subsample):
-    """Fast voxel subsampling using 1D hash + sort-based first-occurrence.
+    """Voxel subsample a point cloud. Tries Open3D C++ (fastest), then numpy fallback."""
+    # Open3D C++ implementation — 10x+ faster than numpy for large N
+    try:
+        import open3d as o3d
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
+        pcd_down = pcd.voxel_down_sample(voxel_size=subsample)
+        return np.asarray(pcd_down.points)
+    except (ImportError, Exception):
+        pass
 
-    ~40% faster than np.unique by using argsort + diff instead of full unique.
-    Tries numba hash-based O(N) approach first (available in container).
-    """
+    # Numpy fallback: 1D voxel hash + sort-based first-occurrence
     N = len(xyz)
-    # Compute 1D voxel hash
     voxel_ids = np.floor(xyz / subsample).astype(np.int64)
     v_min = voxel_ids.min(axis=0)
     voxel_ids -= v_min
@@ -227,34 +233,6 @@ def _voxel_subsample(xyz, subsample):
     flat = (voxel_ids[:, 0] * dims[1] * dims[2] +
             voxel_ids[:, 1] * dims[2] +
             voxel_ids[:, 2])
-
-    # Try numba parallel hash dedup (O(N), fastest)
-    try:
-        from numba import njit
-        @njit
-        def _hash_unique_mask(flat):
-            N = len(flat)
-            table_size = N * 2
-            table = np.full(table_size, -1, dtype=np.int64)
-            keep = np.zeros(N, dtype=np.bool_)
-            for i in range(N):
-                h = flat[i] % table_size
-                while True:
-                    if table[h] == -1:
-                        table[h] = flat[i]
-                        keep[i] = True
-                        break
-                    elif table[h] == flat[i]:
-                        break
-                    h = (h + 1) % table_size
-            return keep
-
-        mask = _hash_unique_mask(flat)
-        return xyz[mask]
-    except (ImportError, Exception):
-        pass
-
-    # Fallback: sort + first-occurrence (~40% faster than np.unique)
     sort_idx = flat.argsort()
     flat_sorted = flat[sort_idx]
     keep = np.empty(N, dtype=bool)
@@ -289,32 +267,43 @@ def _save_result_ply(path, xyz, semantic, instance, scores):
 def _split_into_tiles(xyz, tile_size, overlap):
     """Split point cloud into spatial tiles with overlap.
 
-    Uses vectorized bin assignment — O(N) per overlap pass instead of O(tiles × N).
+    Uses Open3D crop (C++) when available, numpy vectorized fallback otherwise.
     Returns list of (tile_indices, tile_center_xy) for each tile.
     """
-    x_min, y_min = xyz[:, 0].min(), xyz[:, 1].min()
-    x_max, y_max = xyz[:, 0].max(), xyz[:, 1].max()
+    x_min, y_min, z_min = xyz[:, 0].min(), xyz[:, 1].min(), xyz[:, 2].min()
+    x_max, y_max, z_max = xyz[:, 0].max(), xyz[:, 1].max(), xyz[:, 2].max()
     stride = tile_size - overlap
 
-    # Number of tiles in each dimension
     nx = max(1, int(np.ceil((x_max - x_min - overlap) / stride)))
     ny = max(1, int(np.ceil((y_max - y_min - overlap) / stride)))
 
-    # Pre-compute tile grid origins
     tile_origins = []
     for iy in range(ny):
         for ix in range(nx):
             tile_origins.append((x_min + ix * stride, y_min + iy * stride))
 
-    # Assign each point to primary tile (no overlap)
-    bx = np.floor((xyz[:, 0] - x_min) / stride).astype(np.int32).clip(0, nx - 1)
-    by = np.floor((xyz[:, 1] - y_min) / stride).astype(np.int32).clip(0, ny - 1)
-    primary_tile = by * nx + bx
+    # Try Open3D crop (C++ backend, faster for many tiles)
+    try:
+        import open3d as o3d
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
 
-    # For each tile, collect points within its full extent (including overlap)
+        tiles = []
+        for ox, oy in tile_origins:
+            bb = o3d.geometry.AxisAlignedBoundingBox(
+                min_bound=[ox, oy, z_min - 1],
+                max_bound=[ox + tile_size, oy + tile_size, z_max + 1])
+            indices = bb.get_point_indices_within_bounding_box(pcd.points)
+            if len(indices) > 0:
+                center = np.array([ox + tile_size / 2, oy + tile_size / 2])
+                tiles.append((np.array(indices), center))
+        return tiles
+    except (ImportError, Exception):
+        pass
+
+    # Numpy fallback
     tiles = []
-    for tid, (ox, oy) in enumerate(tile_origins):
-        # Points in overlap region: check full tile bounds
+    for ox, oy in tile_origins:
         mask = (
             (xyz[:, 0] >= ox) & (xyz[:, 0] < ox + tile_size) &
             (xyz[:, 1] >= oy) & (xyz[:, 1] < oy + tile_size)
@@ -394,12 +383,29 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
         _log_task(task_id, t_start, "Reading point cloud...")
         if suffix in ('.las', '.laz'):
             import laspy
-            las = laspy.read(input_path)
-            xyz = np.column_stack([
-                np.array(las.x, dtype=np.float64),
-                np.array(las.y, dtype=np.float64),
-                np.array(las.z, dtype=np.float64),
-            ])
+            # Use chunked reading for large files to reduce peak memory
+            try:
+                with laspy.open(input_path) as reader:
+                    n_points = reader.header.point_count
+                    _log_task(task_id, t_start, f"Header: {n_points:,} points, reading in chunks...")
+                    chunks = []
+                    for chunk in reader.chunk_iterator(5_000_000):
+                        chunks.append(np.column_stack([
+                            np.array(chunk.x, dtype=np.float64),
+                            np.array(chunk.y, dtype=np.float64),
+                            np.array(chunk.z, dtype=np.float64),
+                        ]))
+                    xyz = np.concatenate(chunks, axis=0)
+                    del chunks
+            except Exception:
+                # Fallback to full read
+                las = laspy.read(input_path)
+                xyz = np.column_stack([
+                    np.array(las.x, dtype=np.float64),
+                    np.array(las.y, dtype=np.float64),
+                    np.array(las.z, dtype=np.float64),
+                ])
+                del las
         else:  # .ply
             xyz = _read_ply_xyz(input_path)
 
