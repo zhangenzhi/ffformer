@@ -585,6 +585,7 @@ function startPolling(taskId) {
       if (data.status === 'completed') {
         clearInterval(pollingTimers[taskId]);
         delete pollingTimers[taskId];
+        _hwSource = 'health'; // Let health check resume updating hw panel
 
         // Hide progress, re-enable upload
         setTimeout(() => {
@@ -598,6 +599,7 @@ function startPolling(taskId) {
       } else if (data.status === 'failed') {
         clearInterval(pollingTimers[taskId]);
         delete pollingTimers[taskId];
+        _hwSource = 'health';
 
         progressContainer.classList.remove('show');
         uploadBtn.disabled = false;
@@ -1459,8 +1461,9 @@ function hasActiveTasks() {
   return Object.keys(pollingTimers).length > 0;
 }
 
+let _hwSource = 'health'; // 'health' or 'poll' — prevents two sources fighting
+
 async function checkHealth() {
-  // Use longer timeout when tasks are running (server is busy with inference)
   const timeout = hasActiveTasks() ? 30000 : 5000;
   try {
     const resp = await fetch(`${API}/health`, {signal: AbortSignal.timeout(timeout)});
@@ -1468,17 +1471,19 @@ async function checkHealth() {
     document.getElementById('statusDot').className = 'dot on';
     document.getElementById('statusText').textContent =
       `GPU Ready${data.model_loaded ? ' · Model Loaded' : ''}`;
-    updateHardwarePanel(data);
+    // Only update hardware panel from health if poll isn't actively updating it
+    if (_hwSource !== 'poll') {
+      updateHardwarePanel(data);
+    }
   } catch(e) {
     if (hasActiveTasks()) {
-      // Server is busy processing — not offline
       document.getElementById('statusDot').className = 'dot busy';
       document.getElementById('statusText').textContent = 'Processing (server busy)';
-      document.getElementById('hwContent').innerHTML =
-        '<div style="color:var(--orange)">Server busy — inference running</div>';
+      // Don't touch hwContent — poll is handling it
     } else {
       document.getElementById('statusDot').className = 'dot off';
       document.getElementById('statusText').textContent = 'Server Offline';
+      _hwSource = 'health';
       document.getElementById('hwContent').textContent = 'Server offline';
     }
   }
@@ -1494,8 +1499,14 @@ function utilBar(label, pct, detail) {
     `<div class="hw-bar"><div class="hw-bar-fill ${barColor(p)}" style="width:${p}%"></div></div>`;
 }
 
+let _lastHwHtml = '';
+function _setHwContent(html) {
+  if (html === _lastHwHtml) return; // skip if unchanged
+  _lastHwHtml = html;
+  document.getElementById('hwContent').innerHTML = html;
+}
+
 function updateHardwarePanel(data) {
-  const el = document.getElementById('hwContent');
   let html = '';
   const row = (label, val) => `<div class="hw-row"><span class="hw-label">${label}</span><span class="hw-val">${val}</span></div>`;
 
@@ -1548,11 +1559,12 @@ function updateHardwarePanel(data) {
     html += '</div>';
   }
 
-  el.innerHTML = html;
+  _setHwContent(html);
 }
 
 // Update hardware panel from lightweight task poll data (works even when /health is slow)
 function updateHardwareFromPoll(hw) {
+  _hwSource = 'poll';
   const el = document.getElementById('hwContent');
   const row = (label, val) => `<div class="hw-row"><span class="hw-label">${label}</span><span class="hw-val">${val}</span></div>`;
   let html = '<div class="hw-section-title" style="color:var(--orange)">Live · Inference Running</div>';
@@ -1574,8 +1586,7 @@ function updateHardwareFromPoll(hw) {
     html += utilBar('RAM', hw.ram_used_pct);
   }
 
-  el.innerHTML = html;
-  // Also set status to busy
+  _setHwContent(html);
   document.getElementById('statusDot').className = 'dot busy';
 }
 
