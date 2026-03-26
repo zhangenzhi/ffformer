@@ -213,48 +213,66 @@ def _log_task(task_id, t_start, message):
 
 
 def _save_result_ply(path, xyz, semantic, instance, scores):
-    """Write merged result to PLY file."""
+    """Write merged result to PLY file (vectorized, fast for millions of points)."""
     N = len(xyz)
+    header = (
+        "ply\nformat ascii 1.0\n"
+        f"element vertex {N}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property int semantic_pred\nproperty int instance_pred\n"
+        "property float score\nend_header\n"
+    )
+    # Build data array and write in one shot with np.savetxt
+    data = np.column_stack([
+        xyz,
+        semantic.astype(np.float64),
+        instance.astype(np.float64),
+        scores.astype(np.float64),
+    ])
     with open(path, 'w') as f:
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"element vertex {N}\n")
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
-        f.write("property int semantic_pred\n")
-        f.write("property int instance_pred\n")
-        f.write("property float score\n")
-        f.write("end_header\n")
-        for i in range(N):
-            f.write(f"{xyz[i,0]:.6f} {xyz[i,1]:.6f} {xyz[i,2]:.6f} "
-                    f"{semantic[i]} {instance[i]} {scores[i]:.4f}\n")
+        f.write(header)
+    with open(path, 'ab') as f:
+        np.savetxt(f, data, fmt='%.6f %.6f %.6f %d %d %.4f')
 
 
 def _split_into_tiles(xyz, tile_size, overlap):
     """Split point cloud into spatial tiles with overlap.
 
+    Uses vectorized bin assignment — O(N) per overlap pass instead of O(tiles × N).
     Returns list of (tile_indices, tile_center_xy) for each tile.
     """
     x_min, y_min = xyz[:, 0].min(), xyz[:, 1].min()
     x_max, y_max = xyz[:, 0].max(), xyz[:, 1].max()
     stride = tile_size - overlap
 
+    # Number of tiles in each dimension
+    nx = max(1, int(np.ceil((x_max - x_min - overlap) / stride)))
+    ny = max(1, int(np.ceil((y_max - y_min - overlap) / stride)))
+
+    # Pre-compute tile grid origins
+    tile_origins = []
+    for iy in range(ny):
+        for ix in range(nx):
+            tile_origins.append((x_min + ix * stride, y_min + iy * stride))
+
+    # Assign each point to primary tile (no overlap)
+    bx = np.floor((xyz[:, 0] - x_min) / stride).astype(np.int32).clip(0, nx - 1)
+    by = np.floor((xyz[:, 1] - y_min) / stride).astype(np.int32).clip(0, ny - 1)
+    primary_tile = by * nx + bx
+
+    # For each tile, collect points within its full extent (including overlap)
     tiles = []
-    y = y_min
-    while y < y_max:
-        x = x_min
-        while x < x_max:
-            mask = (
-                (xyz[:, 0] >= x) & (xyz[:, 0] < x + tile_size) &
-                (xyz[:, 1] >= y) & (xyz[:, 1] < y + tile_size)
-            )
-            indices = np.where(mask)[0]
-            if len(indices) > 0:
-                center = np.array([x + tile_size / 2, y + tile_size / 2])
-                tiles.append((indices, center))
-            x += stride
-        y += stride
+    for tid, (ox, oy) in enumerate(tile_origins):
+        # Points in overlap region: check full tile bounds
+        mask = (
+            (xyz[:, 0] >= ox) & (xyz[:, 0] < ox + tile_size) &
+            (xyz[:, 1] >= oy) & (xyz[:, 1] < oy + tile_size)
+        )
+        indices = np.where(mask)[0]
+        if len(indices) > 0:
+            center = np.array([ox + tile_size / 2, oy + tile_size / 2])
+            tiles.append((indices, center))
+
     return tiles
 
 
@@ -341,8 +359,16 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
         _update_task_progress(task_id, 'subsampling', progress=25)
         if subsample > 0:
             _log_task(task_id, t_start, f"Voxel subsampling at {subsample}m...")
+            # Hash-based O(N) voxel subsampling — much faster than np.unique for large N
             voxel_ids = np.floor(xyz / subsample).astype(np.int64)
-            _, idx = np.unique(voxel_ids, axis=0, return_index=True)
+            # Cantor-style hash: combine 3 ints into 1 for fast unique lookup
+            v_min = voxel_ids.min(axis=0)
+            voxel_ids -= v_min  # shift to non-negative
+            dims = voxel_ids.max(axis=0) + 1
+            flat = (voxel_ids[:, 0] * dims[1] * dims[2] +
+                    voxel_ids[:, 1] * dims[2] +
+                    voxel_ids[:, 2])
+            _, idx = np.unique(flat, return_index=True)
             xyz = xyz[idx]
 
         n_subsampled = len(xyz)
