@@ -153,12 +153,12 @@ COPY mmcv_compat.py /app/
 
 # Create home dir for user 1000 and setup git for hot-patching
 RUN mkdir -p /home/appuser && chmod 777 /home/appuser && \
-    chmod -R a+rw /app/ && \
     cd /app && git init -b main && \
     git config --global --add safe.directory /app && \
     git remote add origin https://github.com/zhangenzhi/ffformer.git && \
     git fetch origin main --depth=1 && \
     git reset --hard origin/main && \
+    chmod -R a+rw /app/ && \
     cp /root/.gitconfig /home/appuser/.gitconfig 2>/dev/null; \
     chmod 666 /home/appuser/.gitconfig 2>/dev/null; true
 
