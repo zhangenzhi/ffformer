@@ -27,6 +27,8 @@ import shutil
 import tempfile
 import time
 import threading
+import asyncio
+import multiprocessing
 from pathlib import Path
 
 # Ensure project root
@@ -41,6 +43,12 @@ from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTex
 from fastapi.middleware.cors import CORSMiddleware
 
 import numpy as np
+
+# Use 'spawn' to avoid CUDA fork issues in subprocess
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # already set
 
 app = FastAPI(
     title="ForestFormer3D API",
@@ -91,8 +99,18 @@ def get_engine():
     return _engine
 
 
-# --- Task tracking ---
-tasks = {}  # task_id -> {status, step, progress, result_path, stats, error, ...}
+# --- Task tracking (shared across processes via Manager) ---
+# Manager is only created in the main process; subprocesses receive the proxy via args
+_manager = None
+tasks = None
+
+def _init_task_manager():
+    global _manager, tasks
+    if _manager is None:
+        _manager = multiprocessing.Manager()
+        tasks = _manager.dict()
+
+_init_task_manager()
 
 
 PROGRESS_STEPS = [
@@ -146,18 +164,20 @@ def _get_gpu_utilization():
 
 
 def _update_task_progress(task_id, step, progress=None, **extra):
-    """Update task progress atomically."""
+    """Update task progress atomically (Manager dict needs full reassignment)."""
     if task_id not in tasks:
         return
-    tasks[task_id]['step'] = step
-    tasks[task_id]['step_label'] = STEP_NAMES.get(step, step)
-    tasks[task_id]['progress'] = progress if progress is not None else STEP_PROGRESS.get(step, 0)
-    tasks[task_id]['updated'] = time.time()
+    t = dict(tasks[task_id])  # copy from Manager proxy
+    t['step'] = step
+    t['step_label'] = STEP_NAMES.get(step, step)
+    t['progress'] = progress if progress is not None else STEP_PROGRESS.get(step, 0)
+    t['updated'] = time.time()
     if step in ('completed', 'failed'):
-        tasks[task_id]['status'] = step
+        t['status'] = step
     else:
-        tasks[task_id]['status'] = 'processing'
-    tasks[task_id].update(extra)
+        t['status'] = 'processing'
+    t.update(extra)
+    tasks[task_id] = t  # atomic reassignment to Manager dict
 
 
 def _log_task(task_id, t_start, message):
@@ -165,7 +185,11 @@ def _log_task(task_id, t_start, message):
     elapsed = round(time.time() - t_start, 1)
     entry = f"[{elapsed}s] {message}"
     if task_id in tasks:
-        tasks[task_id].setdefault('log', []).append(entry)
+        t = dict(tasks[task_id])
+        log = list(t.get('log', []))
+        log.append(entry)
+        t['log'] = log
+        tasks[task_id] = t
 
 
 def _save_result_ply(path, xyz, semantic, instance, scores):
@@ -264,10 +288,16 @@ def _merge_tile_results(xyz, tile_results, tiles):
     return semantic, instance, scores
 
 
-def _run_inference_background(task_id, input_path, suffix, subsample, tile_size):
-    """Run the full inference pipeline in a background thread with tiled inference."""
+def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsample, tile_size):
+    """Run the full inference pipeline in a subprocess with tiled inference.
+
+    Runs in a separate process to avoid GIL blocking the API server.
+    Uses Manager dict proxy for cross-process task progress updates.
+    """
+    # In subprocess: use the passed proxy instead of module-level tasks
+    global tasks
+    tasks = tasks_proxy
     t_start = time.time()
-    tasks[task_id].setdefault('log', [])
     overlap = tile_size * 0.2  # 20% overlap between tiles
     try:
         # Read point cloud
@@ -311,8 +341,15 @@ def _run_inference_background(task_id, input_path, suffix, subsample, tile_size)
                               stats={'n_original': n_original, 'n_processed': n_subsampled,
                                      'n_tiles': n_tiles, 'tile_size': tile_size})
 
-        # Run inference on each tile
-        engine = get_engine()
+        # Load engine in this process (subprocess has its own memory space)
+        from deploy.inference_engine import ForestFormerEngine
+        config = os.environ.get('CONFIG_PATH',
+                                os.path.join(PROJECT_ROOT, 'configs', 'jpeaks_test.py'))
+        ckpt = os.environ.get('CHECKPOINT_PATH',
+                              os.path.join(PROJECT_ROOT, 'work_dirs',
+                                           'clean_forestformer', 'epoch_3000_fix.pth'))
+        _log_task(task_id, t_start, "Loading model...")
+        engine = ForestFormerEngine(config_path=config, checkpoint_path=ckpt)
         task_dir = os.path.dirname(input_path)
         tile_results = []
         t_infer_start = time.time()
@@ -431,7 +468,7 @@ def health():
     import platform
     info = {
         "status": "ok",
-        "model_loaded": _engine is not None,
+        "model_loaded": any(t.get('status') == 'processing' for t in tasks.values()),
         "gpu_available": False,
         "system": {
             "python": platform.python_version(),
@@ -543,13 +580,13 @@ async def predict(
 
     _update_task_progress(task_id, 'uploading', progress=5)
 
-    # Launch background thread for inference
-    thread = threading.Thread(
+    # Launch background process for inference (separate process = no GIL blocking API)
+    proc = multiprocessing.Process(
         target=_run_inference_background,
-        args=(task_id, input_path, suffix, subsample, tile_size),
+        args=(tasks, task_id, input_path, suffix, subsample, tile_size),
         daemon=True,
     )
-    thread.start()
+    proc.start()
 
     return JSONResponse({
         'task_id': task_id,
@@ -923,12 +960,12 @@ def predict_data(req: _DataInferenceRequest):
         'updated': time.time(),
     }
 
-    thread = threading.Thread(
+    proc = multiprocessing.Process(
         target=_run_inference_background,
-        args=(task_id, input_path, suffix, req.subsample, req.tile_size),
+        args=(tasks, task_id, input_path, suffix, req.subsample, req.tile_size),
         daemon=True,
     )
-    thread.start()
+    proc.start()
 
     return JSONResponse({
         'task_id': task_id,
