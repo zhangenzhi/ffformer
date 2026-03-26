@@ -292,8 +292,8 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
           <input type="number" id="paramSubsample" value="0.05" step="0.01" min="0">
         </div>
         <div>
-          <label>Max Points</label>
-          <input type="number" id="paramMaxPts" value="500000" step="50000" min="0">
+          <label>Tile Size (m)</label>
+          <input type="number" id="paramTileSize" value="30" step="5" min="10">
         </div>
       </div>
       <button class="btn btn-primary" id="uploadBtn" disabled>Upload & Process</button>
@@ -445,12 +445,14 @@ function selectFile(f) {
 }
 
 // Step order for progress tracking
-const STEP_ORDER = ['uploading', 'reading', 'subsampling', 'inferring', 'saving', 'tiling', 'completed'];
+const STEP_ORDER = ['uploading', 'reading', 'subsampling', 'splitting', 'inferring', 'merging', 'saving', 'tiling', 'completed'];
 const STEP_MAP = {
   'uploading': [],
   'reading': ['stepRead'],
   'subsampling': ['stepRead', 'stepSubsample'],
+  'splitting': ['stepRead', 'stepSubsample'],
   'inferring': ['stepRead', 'stepSubsample', 'stepInfer'],
+  'merging': ['stepRead', 'stepSubsample', 'stepInfer'],
   'saving': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
   'tiling': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
   'completed': ['stepRead', 'stepSubsample', 'stepInfer', 'stepSave'],
@@ -459,7 +461,9 @@ const STEP_ACTIVE = {
   'uploading': null,
   'reading': 'stepRead',
   'subsampling': 'stepSubsample',
+  'splitting': 'stepSubsample',
   'inferring': 'stepInfer',
+  'merging': 'stepInfer',
   'saving': 'stepSave',
   'tiling': 'stepSave',
   'completed': null,
@@ -470,9 +474,13 @@ function updateProgressUI(data) {
   const pct = data.progress || 0;
   const elapsed = data.elapsed || 0;
 
-  progressLabel.textContent = data.step_label || step;
+  let label = data.step_label || step;
+  if (step === 'inferring' && (data.stats||{}).n_tiles > 1) {
+    label = `Inferring tile ${(data.stats||{}).current_tile||'?'}/${data.stats.n_tiles}`;
+  }
+  progressLabel.textContent = label;
   progressBar.style.width = pct + '%';
-  progressBar.classList.toggle('indeterminate', step === 'inferring' && pct < 90);
+  progressBar.classList.toggle('indeterminate', false);
   progressElapsed.textContent = elapsed.toFixed(1) + 's';
 
   // Show detail info: speed, points, ETA
@@ -482,13 +490,27 @@ function updateProgressUI(data) {
   if (step === 'reading' || step === 'subsampling') {
     const pts = stats.n_original || stats.n_points || 0;
     if (pts > 0) detailText = pts.toLocaleString() + ' points loaded';
-  } else if (step === 'inferring') {
+  } else if (step === 'splitting') {
+    const tiles = stats.n_tiles || 0;
     const pts = stats.n_processed || 0;
-    if (pts > 0) detailText = pts.toLocaleString() + ' points processing';
+    if (tiles > 0) detailText = `${pts.toLocaleString()} pts → ${tiles} tiles (${stats.tile_size||30}m)`;
+    else if (pts > 0) detailText = pts.toLocaleString() + ' points, splitting...';
+  } else if (step === 'inferring') {
+    const tile = stats.current_tile || 0;
+    const total = stats.n_tiles || 1;
+    const tilePts = stats.tile_points || 0;
+    if (total > 1) {
+      detailText = `Tile ${tile}/${total} · ${tilePts.toLocaleString()} pts`;
+    } else {
+      const pts = stats.n_processed || 0;
+      if (pts > 0) detailText = pts.toLocaleString() + ' points processing';
+    }
     if (elapsed > 0 && pct > 0 && pct < 100) {
       const eta = (elapsed / pct * (100 - pct)).toFixed(0);
       detailText += ` · ETA ~${eta}s`;
     }
+  } else if (step === 'merging') {
+    detailText = 'Merging tile predictions...';
   } else if (step === 'tiling') {
     detailText = 'Building streaming viewer tiles...';
   } else if (step === 'completed') {
@@ -588,7 +610,7 @@ uploadBtn.addEventListener('click', async () => {
   const formData = new FormData();
   formData.append('file', selectedFile);
   const sub = document.getElementById('paramSubsample').value;
-  const maxp = document.getElementById('paramMaxPts').value;
+  const tileSize = document.getElementById('paramTileSize').value;
   const fileSize = selectedFile.size;
   const uploadStart = Date.now();
 
@@ -596,7 +618,7 @@ uploadBtn.addEventListener('click', async () => {
     // Use XMLHttpRequest for upload progress
     const resp = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${API}/predict?subsample=${sub}&max_points=${maxp}`);
+      xhr.open('POST', `${API}/predict?subsample=${sub}&tile_size=${tileSize}`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
           const pct = Math.round(e.loaded / e.total * 10); // 0-10% for upload phase
@@ -1261,7 +1283,7 @@ async function refreshData() {
 
 async function runDataInference(dataPath) {
   const sub = document.getElementById('paramSubsample').value;
-  const maxp = document.getElementById('paramMaxPts').value;
+  const tileSize = document.getElementById('paramTileSize').value;
 
   // Show progress
   progressContainer.classList.add('show');
@@ -1278,7 +1300,7 @@ async function runDataInference(dataPath) {
     const resp = await fetch(`${API}/predict/data`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({data_path: dataPath, subsample: parseFloat(sub), max_points: parseInt(maxp)}),
+      body: JSON.stringify({data_path: dataPath, subsample: parseFloat(sub), tile_size: parseFloat(tileSize)}),
     });
     const data = await resp.json();
 
