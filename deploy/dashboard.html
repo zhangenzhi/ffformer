@@ -1641,13 +1641,31 @@ checkHealth();
 loadModels();
 setInterval(checkHealth, 15000);
 
-// Load existing tasks
+// Load existing tasks and restore progress UI for active ones
 fetch(`${API}/tasks`).then(r=>r.json()).then(data=>{
   for(const [tid,t] of Object.entries(data)){
     taskData[tid] = {...t, task_id:tid};
-    // Resume polling for any still-processing tasks
     if (t.status === 'processing') {
       startPolling(tid);
+
+      // Restore progress UI
+      progressContainer.dataset.taskId = tid;
+      progressContainer.classList.add('show');
+      uploadBtn.disabled = true;
+
+      // Fetch current status to populate progress bar immediately
+      fetch(`${API}/task/${tid}/status`).then(r=>r.json()).then(s=>{
+        taskData[tid] = {...taskData[tid], ...s, task_id:tid};
+        updateProgressUI(s);
+        renderTaskList();
+        // Restore already-completed tile previews
+        if (s.completed_tiles) {
+          for (let i = 0; i < s.completed_tiles; i++) {
+            loadTilePreview(tid, i);
+          }
+          loadedTiles[tid] = s.completed_tiles;
+        }
+      }).catch(()=>{});
     }
   }
   renderTaskList();
