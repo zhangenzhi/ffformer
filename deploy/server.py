@@ -122,20 +122,17 @@ STEP_PROGRESS = {s[0]: s[2] for s in PROGRESS_STEPS}
 
 
 def _get_gpu_utilization():
-    """Get real-time GPU utilization (lightweight, no GIL issues)."""
+    """Get real-time GPU/system utilization via nvidia-smi + psutil.
+
+    IMPORTANT: Do NOT use torch.cuda.* here — it initializes CUDA in the parent
+    process and breaks fork()-ed subprocess GPU access.
+    """
     stats = {}
-    try:
-        import torch
-        if torch.cuda.is_available():
-            stats['vram_allocated_gb'] = round(torch.cuda.memory_allocated(0) / 1e9, 2)
-            stats['vram_reserved_gb'] = round(torch.cuda.memory_reserved(0) / 1e9, 2)
-            stats['vram_total_gb'] = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
-    except Exception:
-        pass
     try:
         import subprocess
         result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,temperature.gpu',
+            ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,'
+             'memory.used,memory.total',
              '--format=csv,noheader,nounits', '-i', '0'],
             capture_output=True, text=True, timeout=3
         )
@@ -144,6 +141,8 @@ def _get_gpu_utilization():
             stats['gpu_util_pct'] = float(parts[0])
             stats['mem_util_pct'] = float(parts[1])
             stats['temp_c'] = float(parts[2])
+            stats['vram_reserved_gb'] = round(float(parts[3]) / 1024, 2)
+            stats['vram_total_gb'] = round(float(parts[4]) / 1024, 1)
     except Exception:
         pass
     try:
@@ -536,42 +535,50 @@ def health():
             "cpu_count": os.cpu_count(),
         },
     }
+    # IMPORTANT: Do NOT call torch.cuda.* here — it initializes CUDA in the parent
+    # process, which breaks fork()-ed subprocess GPU access. Use nvidia-smi only.
     try:
         import torch
-        info["gpu_available"] = torch.cuda.is_available()
         info["torch"] = torch.__version__
-        if torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(0)
-            mem_total = props.total_memory
-            mem_reserved = torch.cuda.memory_reserved(0)
-            mem_allocated = torch.cuda.memory_allocated(0)
-            info["gpu"] = {
-                "name": torch.cuda.get_device_name(0),
-                "count": torch.cuda.device_count(),
-                "memory_total_gb": round(mem_total / 1e9, 1),
-                "memory_reserved_gb": round(mem_reserved / 1e9, 1),
-                "memory_allocated_gb": round(mem_allocated / 1e9, 1),
-                "memory_used_pct": round(mem_reserved / mem_total * 100, 1) if mem_total else 0,
-                "cuda_version": torch.version.cuda,
-            }
-            # GPU utilization via nvidia-smi (works even during inference)
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit',
-                     '--format=csv,noheader,nounits', '-i', '0'],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0:
-                    parts = [p.strip() for p in result.stdout.strip().split(',')]
-                    info["gpu"]["utilization_pct"] = float(parts[0])
-                    info["gpu"]["memory_util_pct"] = float(parts[1])
-                    info["gpu"]["temperature_c"] = float(parts[2])
-                    info["gpu"]["power_w"] = float(parts[3])
-                    info["gpu"]["power_limit_w"] = float(parts[4])
-            except Exception:
-                pass
     except ImportError:
+        pass
+    try:
+        import subprocess
+        # Query all GPU info via nvidia-smi (no CUDA context needed)
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name,count,memory.total,memory.used,memory.free,'
+             'utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit',
+             '--format=csv,noheader,nounits', '-i', '0'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(',')]
+            mem_total = float(parts[2]) / 1024  # MiB -> GiB
+            mem_used = float(parts[3]) / 1024
+            # Get CUDA version from nvidia-smi header
+            cuda_ver = ''
+            smi_out = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=5)
+            if smi_out.returncode == 0:
+                for line in smi_out.stdout.split('\n'):
+                    if 'CUDA Version' in line:
+                        cuda_ver = line.split('CUDA Version:')[1].strip().split()[0]
+                        break
+            info["gpu_available"] = True
+            info["gpu"] = {
+                "name": parts[0],
+                "count": int(parts[1]),
+                "memory_total_gb": round(mem_total, 1),
+                "memory_reserved_gb": round(mem_used, 1),
+                "memory_allocated_gb": round(mem_used, 1),
+                "memory_used_pct": round(mem_used / mem_total * 100, 1) if mem_total else 0,
+                "cuda_version": cuda_ver,
+                "utilization_pct": float(parts[5]),
+                "memory_util_pct": float(parts[6]),
+                "temperature_c": float(parts[7]),
+                "power_w": float(parts[8]),
+                "power_limit_w": float(parts[9]),
+            }
+    except Exception:
         pass
     try:
         import psutil
