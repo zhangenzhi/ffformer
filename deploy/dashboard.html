@@ -296,8 +296,12 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
       <input type="file" id="fileInput" accept=".las,.laz,.ply" hidden>
       <div class="upload-params">
         <div>
-          <label>Voxel Size (m, 0=full)</label>
-          <input type="number" id="paramSubsample" value="0" step="0.01" min="0">
+          <label>Tile Size (m)</label>
+          <input type="number" id="paramTileSize" value="100" step="10" min="20">
+        </div>
+        <div>
+          <label>Overlap (m)</label>
+          <input type="number" id="paramOverlap" value="10" step="1" min="0">
         </div>
       </div>
       <button class="btn btn-primary" id="uploadBtn" disabled>Upload & Process</button>
@@ -447,8 +451,9 @@ function selectFile(f) {
 // Visible pipeline stages (order matters)
 const VISIBLE_STAGES = [
   {key:'reading',     label:'Read'},
-  {key:'subsampling', label:'Subsample'},
+  {key:'splitting',   label:'Split'},
   {key:'inferring',   label:'Infer'},
+  {key:'merging',     label:'Merge'},
   {key:'saving',      label:'Save'},
   {key:'tiling',      label:'Tiles'},
 ];
@@ -475,8 +480,17 @@ function updateProgressUI(data) {
   // Detail line
   const detail = document.getElementById('progressDetail');
   let detailText = '';
-  if (step === 'inferring') {
-    detailText = `${(stats.n_processed||0).toLocaleString()} pts (model handles region splitting)`;
+  if (step === 'splitting') {
+    detailText = `${(stats.n_tiles||0)} tiles (${stats.tile_size||100}m)`;
+  } else if (step === 'inferring') {
+    const tile = stats.current_tile || 0;
+    const total = stats.n_tiles || 1;
+    const tilePts = stats.tile_points || 0;
+    detailText = `Tile ${tile}/${total} · ${tilePts.toLocaleString()} pts`;
+    if (elapsed > 0 && data.progress > 20 && data.progress < 85) {
+      const eta = (elapsed / (data.progress - 20) * (85 - data.progress));
+      detailText += ` · ETA ~${fmtDuration(eta)}`;
+    }
   } else if (step === 'completed') {
     detailText = `${stats.n_trees||0} trees · ${(stats.n_processed||0).toLocaleString()} pts`;
   }
@@ -500,7 +514,12 @@ function updateProgressUI(data) {
       timeStr = st ? fmtDuration(st.duration) : '';
     } else if (i === currentIdx) {
       state = 'active';
-      barPct = 50;
+      // Show tile progress within Infer stage
+      if (s.key === 'inferring' && stats.n_tiles > 1) {
+        barPct = Math.round(((stats.current_tile || 1) - 1) / stats.n_tiles * 100);
+      } else {
+        barPct = 50;
+      }
       timeStr = st ? fmtDuration(now - st.start) : '';
     } else {
       state = 'pending';
@@ -509,6 +528,9 @@ function updateProgressUI(data) {
     }
 
     let nameLabel = s.label;
+    if (s.key === 'inferring' && stats.n_tiles > 1 && state === 'active') {
+      nameLabel = `Infer ${stats.current_tile||'?'}/${stats.n_tiles}`;
+    }
 
     html += `<div class="stage ${state}">
       <div class="stage-name">${nameLabel}</div>
@@ -591,7 +613,8 @@ uploadBtn.addEventListener('click', async () => {
 
   const formData = new FormData();
   formData.append('file', selectedFile);
-  const sub = document.getElementById('paramSubsample').value;
+  const tileSize = document.getElementById('paramTileSize').value;
+  const overlap = document.getElementById('paramOverlap').value;
   const fileSize = selectedFile.size;
   const uploadStart = Date.now();
 
@@ -599,7 +622,7 @@ uploadBtn.addEventListener('click', async () => {
     // Use XMLHttpRequest for upload progress
     const resp = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${API}/predict?subsample=${sub}`);
+      xhr.open('POST', `${API}/predict?tile_size=${tileSize}&overlap=${overlap}`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
           const elapsed = (Date.now() - uploadStart) / 1000;
@@ -1295,7 +1318,8 @@ async function refreshData() {
 }
 
 async function runDataInference(dataPath) {
-  const sub = document.getElementById('paramSubsample').value;
+  const tileSize = document.getElementById('paramTileSize').value;
+  const overlap = document.getElementById('paramOverlap').value;
 
   // Show progress
   progressContainer.classList.add('show');
@@ -1309,7 +1333,7 @@ async function runDataInference(dataPath) {
     const resp = await fetch(`${API}/predict/data`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({data_path: dataPath, subsample: parseFloat(sub)}),
+      body: JSON.stringify({data_path: dataPath, tile_size: parseFloat(tileSize), overlap: parseFloat(overlap)}),
     });
     const data = await resp.json();
 

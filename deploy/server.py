@@ -108,8 +108,9 @@ tasks = _manager.dict()
 PROGRESS_STEPS = [
     ('uploading', 'Uploading file', 0),
     ('reading', 'Reading point cloud', 10),
-    ('subsampling', 'Subsampling points', 15),
+    ('splitting', 'Splitting into tiles', 15),
     ('inferring', 'Running inference', 20),
+    ('merging', 'Merging results', 85),
     ('saving', 'Saving results', 88),
     ('tiling', 'Building viewer tiles', 92),
     ('completed', 'Completed', 100),
@@ -251,26 +252,28 @@ def _save_result_ply(path, xyz, semantic, instance, scores):
 
 
 
-def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsample):
-    """Run the full inference pipeline in a subprocess.
+def _run_inference_background(tasks_proxy, task_id, input_path, suffix, tile_size, overlap):
+    """Tile-based full-resolution inference pipeline (mirrors tools/tile_and_infer.py).
 
-    Passes the complete point cloud to the model — the model internally
-    handles spatial partitioning via cylindrical regions (radius=16m),
-    grid sampling (0.2m), and merging. No server-side tiling needed.
+    1. Read full point cloud (no downsampling)
+    2. Split into large tiles (default 100m) with overlap (default 10m)
+    3. Each tile: independently normalized, full model pipeline
+       (cylindrical regions, grid sampling, instance merging, post-processing)
+    4. Merge tiles by score competition + instance ID offset
     """
     global tasks
     tasks = tasks_proxy
     t_start = time.time()
     try:
-        # Read point cloud
+        # ── Read ──
         _update_task_progress(task_id, 'reading')
         _log_task(task_id, t_start, "Reading point cloud...")
         if suffix in ('.las', '.laz'):
             import laspy
             try:
                 with laspy.open(input_path) as reader:
-                    n_points = reader.header.point_count
-                    _log_task(task_id, t_start, f"Header: {n_points:,} points, reading in chunks...")
+                    n_total = reader.header.point_count
+                    _log_task(task_id, t_start, f"Header: {n_total:,} points, reading...")
                     chunks = []
                     for chunk in reader.chunk_iterator(5_000_000):
                         chunks.append(np.column_stack([
@@ -288,28 +291,56 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
                     np.array(las.z, dtype=np.float64),
                 ])
                 del las
-        else:  # .ply
+        else:
             xyz = _read_ply_xyz(input_path)
 
-        n_original = len(xyz)
-        _log_task(task_id, t_start, f"{n_original:,} points loaded")
-        extent_x = xyz[:, 0].max() - xyz[:, 0].min()
-        extent_y = xyz[:, 1].max() - xyz[:, 1].min()
-        _log_task(task_id, t_start, f"Extent: {extent_x:.1f} x {extent_y:.1f} m")
+        N = len(xyz)
+        xmin, xmax = xyz[:, 0].min(), xyz[:, 0].max()
+        ymin, ymax = xyz[:, 1].min(), xyz[:, 1].max()
+        zmin = xyz[:, 2].min()
+        dx, dy = xmax - xmin, ymax - ymin
+        _log_task(task_id, t_start, f"{N:,} points, extent {dx:.0f}x{dy:.0f}m")
 
-        # Optional voxel subsample (default 0 = no subsample for full resolution)
-        n_processed = n_original
-        if subsample > 0:
-            _update_task_progress(task_id, 'subsampling', progress=15)
-            _log_task(task_id, t_start, f"Voxel subsampling at {subsample}m...")
-            xyz = _voxel_subsample(xyz, subsample)
-            n_processed = len(xyz)
-            _log_task(task_id, t_start, f"{n_processed:,} points after subsampling")
+        # ── Split into tiles ──
+        _update_task_progress(task_id, 'splitting', progress=15)
+        nx = max(1, int(np.ceil(dx / tile_size)))
+        ny = max(1, int(np.ceil(dy / tile_size)))
+        n_tiles = nx * ny
+        _log_task(task_id, t_start, f"Tile grid: {nx}x{ny} = {n_tiles} tiles ({tile_size}m, overlap={overlap}m)")
 
-        _update_task_progress(task_id, 'inferring', progress=20,
-                              stats={'n_original': n_original, 'n_processed': n_processed})
+        tiles = []  # list of {mask, core_bounds, offsets, n_points}
+        for ix in range(nx):
+            for iy in range(ny):
+                # Tile bounds (with overlap)
+                tx0 = xmin + ix * tile_size - overlap
+                tx1 = xmin + (ix + 1) * tile_size + overlap
+                ty0 = ymin + iy * tile_size - overlap
+                ty1 = ymin + (iy + 1) * tile_size + overlap
+                # Core bounds (without overlap, for merge)
+                cx0 = xmin + ix * tile_size
+                cx1 = min(xmin + (ix + 1) * tile_size, xmax)
+                cy0 = ymin + iy * tile_size
+                cy1 = min(ymin + (iy + 1) * tile_size, ymax)
 
-        # Load model
+                mask = ((xyz[:, 0] >= tx0) & (xyz[:, 0] <= tx1) &
+                        (xyz[:, 1] >= ty0) & (xyz[:, 1] <= ty1))
+                n_pts = int(mask.sum())
+                if n_pts < 100:
+                    continue
+                tiles.append({
+                    'mask': mask,
+                    'global_idx': np.where(mask)[0],
+                    'core_bounds': [cx0, cy0, cx1, cy1],
+                    'n_points': n_pts,
+                })
+
+        n_tiles = len(tiles)
+        _log_task(task_id, t_start, f"{n_tiles} non-empty tiles")
+        _update_task_progress(task_id, 'splitting', progress=18,
+                              stats={'n_original': N, 'n_processed': N,
+                                     'n_tiles': n_tiles, 'tile_size': tile_size})
+
+        # ── Load model ──
         from deploy.inference_engine import ForestFormerEngine
         config = os.environ.get('CONFIG_PATH',
                                 os.path.join(PROJECT_ROOT, 'configs', 'jpeaks_test.py'))
@@ -319,42 +350,94 @@ def _run_inference_background(tasks_proxy, task_id, input_path, suffix, subsampl
         _log_task(task_id, t_start, "Loading model...")
         engine = ForestFormerEngine(config_path=config, checkpoint_path=ckpt)
 
-        # Run inference — model internally does cylindrical region splitting,
-        # grid sampling (0.2m), random sampling (640K), and result merging
+        # ── Infer each tile ──
         task_dir = os.path.dirname(input_path)
-        output_ply = os.path.join(task_dir, 'result.ply')
-        _log_task(task_id, t_start, f"Running inference on {n_processed:,} points (model handles region splitting)...")
-        _update_task_progress(task_id, 'inferring', progress=30,
-                              stats={'n_original': n_original, 'n_processed': n_processed})
+        # Global arrays for score-based merge
+        sem_pred = np.full(N, -1, dtype=np.int32)
+        inst_pred = np.full(N, -1, dtype=np.int32)
+        scores = np.full(N, -1.0, dtype=np.float32)
+        max_instance_id = 0
+        t_infer_start = time.time()
 
-        t_infer = time.time()
-        result = engine.predict(xyz, output_ply_path=output_ply)
-        inference_time = round(time.time() - t_infer, 1)
+        for i, tile in enumerate(tiles):
+            progress = 20 + int(65 * i / n_tiles)  # 20-85%
+            _update_task_progress(task_id, 'inferring', progress=progress,
+                                  stats={'n_original': N, 'n_processed': N,
+                                         'n_tiles': n_tiles, 'current_tile': i + 1,
+                                         'tile_points': tile['n_points']})
+            _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
 
-        _log_task(task_id, t_start, f"Inference done in {inference_time}s")
+            tile_xyz = xyz[tile['global_idx']]
 
-        # Save results
+            try:
+                tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
+                t0 = time.time()
+                result = engine.predict(tile_xyz, output_ply_path=tile_ply)
+                dt = round(time.time() - t0, 1)
+
+                tile_sem = result.get('semantic_pred')
+                tile_inst = result.get('instance_pred')
+                tile_scores = result.get('instance_scores')
+                tile_trees = 0
+
+                if tile_inst is not None and tile_scores is not None:
+                    # Score-based merge: only overwrite if this tile's score is better
+                    gi = tile['global_idx']
+                    for j in range(len(gi)):
+                        g = gi[j]
+                        sc = float(tile_scores[j]) if tile_scores is not None else 0
+                        if sc > scores[g]:
+                            if tile_sem is not None:
+                                sem_pred[g] = tile_sem[j]
+                            inst_id = int(tile_inst[j])
+                            inst_pred[g] = (inst_id + max_instance_id) if inst_id >= 0 else -1
+                            scores[g] = sc
+
+                    tile_max_inst = int(tile_inst.max()) if len(tile_inst) > 0 else 0
+                    if tile_max_inst >= 0:
+                        max_instance_id += tile_max_inst + 1
+                    tile_trees = len(set(tile_inst[tile_inst >= 0].tolist()))
+
+                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles}: {tile_trees} trees in {dt}s")
+
+                # Clean up tile PLY
+                if os.path.exists(tile_ply):
+                    os.remove(tile_ply)
+
+            except Exception as e:
+                _log_task(task_id, t_start, f"Tile {i+1}/{n_tiles} failed: {e}")
+
+        inference_time = round(time.time() - t_infer_start, 1)
+
+        # ── Merge ──
+        _update_task_progress(task_id, 'merging', progress=85)
+        _log_task(task_id, t_start, "Merging tile results...")
+        n_trees = len(set(inst_pred[inst_pred >= 0].tolist()))
+        n_assigned = int((inst_pred >= 0).sum())
+        _log_task(task_id, t_start, f"Merged: {n_trees} trees, {n_assigned:,}/{N:,} assigned")
+
+        # ── Save ──
         _update_task_progress(task_id, 'saving', progress=88)
+        output_ply = os.path.join(task_dir, 'result.ply')
+        _save_result_ply(output_ply, xyz, sem_pred, inst_pred, scores)
 
-        sem = result.get('semantic_pred')
-        inst = result.get('instance_pred')
         stats = {
-            'n_original': n_original,
-            'n_processed': n_processed,
+            'n_original': N,
+            'n_processed': N,
+            'n_tiles': n_tiles,
+            'tile_size': tile_size,
             'inference_time_s': inference_time,
+            'n_trees': n_trees,
+            'n_assigned': n_assigned,
         }
-        if sem is not None:
+        if sem_pred is not None:
             stats['semantic'] = {
-                'ground': int((sem == 0).sum()),
-                'wood': int((sem == 1).sum()),
-                'leaf': int((sem == 2).sum()),
+                'ground': int((sem_pred == 0).sum()),
+                'wood': int((sem_pred == 1).sum()),
+                'leaf': int((sem_pred == 2).sum()),
             }
-        if inst is not None:
-            n_trees = len(set(inst[inst >= 0].tolist()))
-            stats['n_trees'] = n_trees
-            stats['n_assigned'] = int((inst >= 0).sum())
 
-        _log_task(task_id, t_start, f"Inference complete, {stats.get('n_trees', 0)} trees found")
+        _log_task(task_id, t_start, f"Done: {n_trees} trees found in {inference_time}s")
         _log_task(task_id, t_start, "Saving results...")
 
         # Save stats JSON
@@ -482,16 +565,18 @@ def health():
 @app.post("/predict")
 async def predict(
     file: UploadFile = File(...),
-    subsample: float = 0,
+    tile_size: float = 100,
+    overlap: float = 10,
 ):
     """Upload a LAS/LAZ/PLY file for tree instance segmentation.
 
-    Returns immediately with a task_id. Poll /task/{task_id}/status for progress.
-    The model internally handles spatial partitioning via cylindrical regions.
+    Full-resolution tiled inference: splits into large tiles, runs the complete
+    model pipeline on each tile, merges results by score competition.
 
     Args:
         file: LAS, LAZ, or PLY point cloud file
-        subsample: Voxel subsampling size in meters (0 = no subsampling, full resolution)
+        tile_size: Tile size in meters (default 100m)
+        overlap: Overlap between tiles in meters (default 10m)
 
     Returns:
         JSON with task_id and status URL
@@ -527,7 +612,7 @@ async def predict(
     # Launch background process for inference (separate process = no GIL blocking API)
     proc = multiprocessing.Process(
         target=_run_inference_background,
-        args=(tasks, task_id, input_path, suffix, subsample),
+        args=(tasks, task_id, input_path, suffix, tile_size, overlap),
         daemon=True,
     )
     proc.start()
@@ -869,13 +954,14 @@ def task_log(task_id: str):
 
 class _DataInferenceRequest(_BaseModel):
     data_path: str
-    subsample: float = 0
+    tile_size: float = 100
+    overlap: float = 10
 
 @app.post("/predict/data")
 def predict_data(req: _DataInferenceRequest):
     """Start inference on a server-side data file (no upload needed).
 
-    JSON body: {data_path: "/workspace/data/scan.las", subsample: 0}
+    JSON body: {data_path: "/workspace/data/scan.las", tile_size: 100, overlap: 10}
     """
     data_path = req.data_path
     if not os.path.isfile(data_path):
@@ -910,7 +996,7 @@ def predict_data(req: _DataInferenceRequest):
 
     proc = multiprocessing.Process(
         target=_run_inference_background,
-        args=(tasks, task_id, input_path, suffix, req.subsample),
+        args=(tasks, task_id, input_path, suffix, req.tile_size, req.overlap),
         daemon=True,
     )
     proc.start()
