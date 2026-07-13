@@ -77,9 +77,20 @@ _engine = None
 INFERENCE_BACKEND = os.environ.get('INFERENCE_BACKEND', 'local')
 
 
+def _ensure_paramiko():
+    """Install paramiko at runtime if missing (image may predate HPC backend)."""
+    try:
+        import paramiko  # noqa: F401
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '--user',
+                        '--quiet', 'paramiko'], check=True)
+
+
 def _get_inference_target():
     """Select the background inference function based on INFERENCE_BACKEND."""
     if INFERENCE_BACKEND == 'hpc':
+        _ensure_paramiko()
         from deploy.hpc_backend import run_hpc_inference
         return run_hpc_inference
     return _run_inference_background
