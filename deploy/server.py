@@ -651,9 +651,19 @@ async def predict(
     os.makedirs(task_dir, exist_ok=True)
     input_path = os.path.join(task_dir, f'input{suffix}')
 
+    # Rewind first: SpooledTemporaryFile sits at EOF for large uploads,
+    # and chunked copy avoids holding multi-GB files in RAM.
+    await file.seek(0)
     with open(input_path, 'wb') as f:
-        content = await file.read()
-        f.write(content)
+        while True:
+            chunk = await file.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+    if os.path.getsize(input_path) == 0:
+        del tasks[task_id]
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise HTTPException(400, "Uploaded file is empty")
 
     _update_task_progress(task_id, 'uploading', progress=5)
 
