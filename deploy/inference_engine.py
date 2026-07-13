@@ -191,6 +191,11 @@ class ForestFormerEngine:
         if output_ply_path:
             out_dir = os.path.dirname(output_ply_path) or '.'
             cfg.model.test_cfg['output_dir'] = out_dir
+            # The built model holds its own copy of test_cfg (registry build
+            # copies the config), so mutate the live instance too — otherwise
+            # the PLY goes to the stale work_dir tempdir from _ensure_loaded.
+            if getattr(self._model, 'test_cfg', None) is not None:
+                self._model.test_cfg['output_dir'] = out_dir
 
         # Rebuild test dataloader with new data (cfg changes don't affect existing loader)
         from mmengine.runner import Runner as _Runner
