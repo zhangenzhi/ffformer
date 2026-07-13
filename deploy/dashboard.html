@@ -264,6 +264,71 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
 ::-webkit-scrollbar-track { background:var(--bg2); }
 ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:3px; }
 ::-webkit-scrollbar-thumb:hover { background:#444; }
+
+/* ===== DaVinci-style bottom page bar ===== */
+.pagebar { height:52px; background:var(--bg2); border-top:1px solid var(--border);
+  display:flex; align-items:stretch; justify-content:center; gap:4px; flex-shrink:0; }
+.pagebar button { background:none; border:none; color:var(--text2); cursor:pointer;
+  padding:0 28px; font-size:12px; font-weight:600; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:3px; border-top:2px solid transparent;
+  transition:all 0.15s; min-width:130px; }
+.pagebar button .pnum { font-size:10px; opacity:0.6; }
+.pagebar button .pico { font-size:18px; line-height:1; }
+.pagebar button:hover { color:var(--text); background:rgba(255,255,255,0.02); }
+.pagebar button.active { color:var(--accent); border-top-color:var(--accent);
+  background:rgba(88,166,255,0.06); }
+.pagebar button:disabled { opacity:0.35; cursor:not-allowed; }
+
+/* Page visibility driven by body class */
+.analysis-page { display:none; flex:1; overflow:hidden; }
+body.page-analyze .main { display:none; }
+body.page-analyze .analysis-page { display:flex; }
+/* Import page: widen sidebar, de-emphasize viewer */
+body.page-import .viewer { opacity:0.35; pointer-events:none; }
+body.page-import .sidebar { width:420px; }
+
+/* ===== Analysis page ===== */
+.analysis-page { flex-direction:row; }
+.tree-panel { width:440px; background:var(--bg2); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; flex-shrink:0; }
+.tree-panel .tp-head { padding:12px 16px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:10px; }
+.tree-panel .tp-head h3 { font-size:13px; color:#e6edf3; }
+.tree-panel .tp-head .count { font-size:11px; color:var(--text2); margin-left:auto; }
+.tree-table-wrap { flex:1; overflow-y:auto; }
+table.tree-table { width:100%; border-collapse:collapse; font-size:11px; }
+table.tree-table th { position:sticky; top:0; background:var(--bg3); color:var(--text2);
+  text-align:right; padding:6px 8px; font-weight:600; text-transform:uppercase;
+  letter-spacing:0.4px; font-size:9px; border-bottom:1px solid var(--border); }
+table.tree-table th:first-child { text-align:left; }
+table.tree-table td { padding:5px 8px; text-align:right; border-bottom:1px solid var(--border);
+  font-variant-numeric:tabular-nums; }
+table.tree-table td:first-child { text-align:left; font-weight:600; color:var(--text); }
+table.tree-table tr { cursor:pointer; transition:background 0.1s; }
+table.tree-table tbody tr:hover { background:rgba(88,166,255,0.06); }
+table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
+.lw-pill { display:inline-block; padding:1px 6px; border-radius:8px; font-size:10px; }
+
+.analysis-main { flex:1; display:flex; flex-direction:column; overflow:hidden; padding:20px;
+  gap:16px; }
+.analysis-main .amx-empty { margin:auto; text-align:center; color:var(--text2); }
+.analysis-main .amx-empty .big { font-size:48px; margin-bottom:10px; }
+.llm-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius);
+  display:flex; flex-direction:column; overflow:hidden; }
+.llm-card .lc-head { padding:12px 16px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:10px; }
+.llm-card .lc-head h3 { font-size:13px; color:#e6edf3; }
+.llm-card .lc-head .badge-ai { font-size:9px; background:rgba(88,166,255,0.15);
+  color:var(--accent); padding:2px 7px; border-radius:8px; text-transform:uppercase;
+  letter-spacing:0.5px; }
+.llm-card .lc-body { padding:16px; font-size:13px; line-height:1.7; color:var(--text);
+  white-space:pre-wrap; overflow-y:auto; }
+.llm-card .lc-body.muted { color:var(--text2); }
+.scene-card { flex-shrink:0; }
+.tree-card { flex:1; }
+.spin { display:inline-block; width:12px; height:12px; border:2px solid var(--border);
+  border-top-color:var(--accent); border-radius:50%; animation:rot 0.8s linear infinite; }
+@keyframes rot { to { transform:rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -379,6 +444,55 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
   </div>
 </div>
 
+<!-- ==================== PAGE 3: 智能分析 ==================== -->
+<div class="analysis-page">
+  <div class="tree-panel">
+    <div class="tp-head">
+      <h3>&#x1F333; 单体树木</h3>
+      <span class="count" id="treeCount">—</span>
+    </div>
+    <div class="tree-table-wrap" id="treeTableWrap">
+      <div class="files-empty" style="padding:20px;color:#8b949e;font-size:12px">
+        在「分割」页选择一个已完成的任务,再切到本页查看逐树指标。
+      </div>
+    </div>
+  </div>
+  <div class="analysis-main" id="analysisMain">
+    <div class="amx-empty" id="analysisEmpty">
+      <div class="big">&#x1F916;</div>
+      <p>选择一个已完成的分割任务开始 AI 分析</p>
+    </div>
+    <div class="llm-card scene-card" id="sceneCard" style="display:none">
+      <div class="lc-head">
+        <h3>林分整体评估</h3>
+        <span class="badge-ai">AI</span>
+        <button class="btn-sm" id="sceneBtn" onclick="analyzeScene()" style="margin-left:auto">生成分析</button>
+      </div>
+      <div class="lc-body muted" id="sceneBody">点击「生成分析」调用 LLM 对整片林地作结构与健康评估。</div>
+    </div>
+    <div class="llm-card tree-card" id="treeCard" style="display:none">
+      <div class="lc-head">
+        <h3 id="treeCardTitle">单株健康分析</h3>
+        <span class="badge-ai">AI</span>
+      </div>
+      <div class="lc-body muted" id="treeBody">在左侧表格点选一棵树,查看其结构与健康的 AI 推断。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== DaVinci-style bottom page bar ==================== -->
+<div class="pagebar">
+  <button class="active" id="pageImport" onclick="switchPage('import')">
+    <span class="pico">&#x1F4E5;</span><span><span class="pnum">1 </span>数据导入</span>
+  </button>
+  <button id="pageSegment" onclick="switchPage('segment')">
+    <span class="pico">&#x1F332;</span><span><span class="pnum">2 </span>分割</span>
+  </button>
+  <button id="pageAnalyze" onclick="switchPage('analyze')">
+    <span class="pico">&#x1F916;</span><span><span class="pnum">3 </span>智能分析</span>
+  </button>
+</div>
+
 <!-- Log Viewer Modal -->
 <div class="log-overlay hidden" id="logOverlay" onclick="if(event.target===this)closeLog()">
   <div class="log-modal">
@@ -409,6 +523,10 @@ const UNASSIGNED = [80,80,80];
 // ==================== STATE ====================
 let selectedFile = null;
 let activeTaskId = null;
+let currentPage = 'segment';
+let treeMetrics = null;       // cached /result/{id}/trees for activeTaskId
+let treeMetricsTask = null;   // which task treeMetrics belongs to
+let selectedTreeId = null;
 let taskData = {};
 let scene, camera, renderer, pointsMesh, pointsMat;
 let spherical = {theta:-Math.PI/2, phi:Math.PI/3, radius:10};
@@ -610,6 +728,7 @@ function startPolling(taskId) {
 uploadBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
   uploadBtn.disabled = true;
+  if (currentPage === 'import') switchPage('segment');  // follow the workflow
   clearTileMeshes();
   loadedTiles = {};
 
@@ -836,6 +955,7 @@ function renderTaskList() {
 async function selectTask(tid) {
   activeTaskId = tid;
   renderTaskList();
+  if (currentPage === 'analyze') refreshAnalysisPage();
   clearTileMeshes();  // Clear progressive tiles before loading final result
 
   const t = taskData[tid];
@@ -1732,7 +1852,126 @@ async function loadTilePreview(taskId, tileIdx) {
   }
 }
 
+// ==================== DAVINCI PAGES + ANALYSIS ====================
+function switchPage(page) {
+  currentPage = page;
+  document.body.classList.remove('page-import', 'page-segment', 'page-analyze');
+  document.body.classList.add('page-' + page);
+  document.getElementById('pageImport').classList.toggle('active', page === 'import');
+  document.getElementById('pageSegment').classList.toggle('active', page === 'segment');
+  document.getElementById('pageAnalyze').classList.toggle('active', page === 'analyze');
+  if (page === 'analyze') refreshAnalysisPage();
+}
+
+async function refreshAnalysisPage() {
+  const empty = document.getElementById('analysisEmpty');
+  const sceneCard = document.getElementById('sceneCard');
+  const treeCard = document.getElementById('treeCard');
+  const t = taskData[activeTaskId];
+  if (!activeTaskId || !t || t.status !== 'completed') {
+    empty.style.display = ''; sceneCard.style.display = 'none'; treeCard.style.display = 'none';
+    document.getElementById('treeCount').textContent = '—';
+    document.getElementById('treeTableWrap').innerHTML =
+      '<div class="files-empty" style="padding:20px;color:#8b949e;font-size:12px">在「分割」页选择一个已完成的任务,再切到本页查看逐树指标。</div>';
+    return;
+  }
+  empty.style.display = 'none';
+  sceneCard.style.display = ''; treeCard.style.display = '';
+  await loadTreeTable(activeTaskId);
+}
+
+async function loadTreeTable(tid) {
+  const wrap = document.getElementById('treeTableWrap');
+  if (treeMetricsTask !== tid) {
+    treeMetrics = null; selectedTreeId = null;
+    wrap.innerHTML = '<div style="padding:20px;color:#8b949e;font-size:12px"><span class="spin"></span> 计算逐树指标…</div>';
+    // Reset LLM cards for the new task
+    document.getElementById('sceneBody').className = 'lc-body muted';
+    document.getElementById('sceneBody').textContent = '点击「生成分析」调用 LLM 对整片林地作结构与健康评估。';
+    document.getElementById('treeBody').className = 'lc-body muted';
+    document.getElementById('treeBody').textContent = '在左侧表格点选一棵树,查看其结构与健康的 AI 推断。';
+    document.getElementById('treeCardTitle').textContent = '单株健康分析';
+    try {
+      const resp = await fetch(`${API}/result/${tid}/trees`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      treeMetrics = await resp.json();
+      treeMetricsTask = tid;
+    } catch (e) {
+      wrap.innerHTML = `<div style="padding:20px;color:#f85149;font-size:12px">指标加载失败: ${e.message}</div>`;
+      return;
+    }
+  }
+  renderTreeTable();
+}
+
+function lwColor(r) {
+  if (r === null || r === undefined) return 'var(--text2)';
+  if (r < 15) return 'var(--orange)';      // sparse foliage — flag
+  if (r > 120) return 'var(--accent)';     // very dense
+  return 'var(--green)';
+}
+
+function renderTreeTable() {
+  const m = treeMetrics;
+  document.getElementById('treeCount').textContent = `${m.n_trees} 棵 · 地面 ${m.ground_z}m`;
+  let html = '<table class="tree-table"><thead><tr>' +
+    '<th>#</th><th>高(m)</th><th>冠幅(m)</th><th>叶木比</th><th>点数</th><th>置信</th>' +
+    '</tr></thead><tbody>';
+  for (const t of m.trees) {
+    const sel = t.id === selectedTreeId ? 'sel' : '';
+    const lw = t.leaf_wood_ratio === null ? '—' : t.leaf_wood_ratio;
+    html += `<tr class="${sel}" onclick="analyzeTree(${t.id})">
+      <td>#${t.id}</td><td>${t.height_m}</td><td>${t.crown_width_m}</td>
+      <td><span class="lw-pill" style="color:${lwColor(t.leaf_wood_ratio)}">${lw}</span></td>
+      <td>${t.n_points.toLocaleString()}</td><td>${t.mean_score}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('treeTableWrap').innerHTML = html;
+}
+
+async function analyzeScene() {
+  if (!activeTaskId) return;
+  const btn = document.getElementById('sceneBtn');
+  const body = document.getElementById('sceneBody');
+  btn.disabled = true;
+  body.className = 'lc-body muted';
+  body.innerHTML = '<span class="spin"></span> LLM 分析中(CPU 推理,约需 1–3 分钟)…';
+  try {
+    const resp = await fetch(`${API}/analyze/${activeTaskId}?lang=zh`, {method: 'POST'});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+    body.className = 'lc-body';
+    body.textContent = data.analysis;
+  } catch (e) {
+    body.className = 'lc-body';
+    body.innerHTML = `<span style="color:#f85149">分析失败: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function analyzeTree(treeId) {
+  if (!activeTaskId) return;
+  selectedTreeId = treeId;
+  renderTreeTable();
+  const body = document.getElementById('treeBody');
+  document.getElementById('treeCardTitle').textContent = `单株健康分析 · #${treeId}`;
+  body.className = 'lc-body muted';
+  body.innerHTML = '<span class="spin"></span> LLM 分析中(CPU 推理,约需 1–3 分钟)…';
+  try {
+    const resp = await fetch(`${API}/analyze/${activeTaskId}/tree/${treeId}?lang=zh`, {method: 'POST'});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+    body.className = 'lc-body';
+    body.textContent = data.analysis;
+  } catch (e) {
+    body.className = 'lc-body';
+    body.innerHTML = `<span style="color:#f85149">分析失败: ${e.message}</span>`;
+  }
+}
+
 // ==================== INIT ====================
+document.body.classList.add('page-segment');
 initViewer();
 checkHealth();
 loadModels();
