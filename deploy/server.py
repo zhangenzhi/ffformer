@@ -1029,6 +1029,44 @@ def list_data():
     return JSONResponse(data_files)
 
 
+@app.get("/data/meta")
+def data_meta(path: str):
+    """Header-only metadata (point count + extent) for a server-side data file.
+
+    Reads only the LAS/LAZ/PLY header, so it's fast even for huge files.
+    """
+    if not os.path.isfile(path):
+        raise HTTPException(404, f"File not found: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    info = {'path': path, 'filename': os.path.basename(path),
+            'size': os.path.getsize(path), 'format': ext.lstrip('.')}
+    try:
+        if ext in ('.las', '.laz'):
+            import laspy
+            with laspy.open(path) as f:
+                h = f.header
+                info['point_count'] = int(h.point_count)
+                info['extent_x'] = round(float(h.maxs[0] - h.mins[0]), 1)
+                info['extent_y'] = round(float(h.maxs[1] - h.mins[1]), 1)
+                info['extent_z'] = round(float(h.maxs[2] - h.mins[2]), 1)
+                info['version'] = f"{h.version.major}.{h.version.minor}"
+        elif ext == '.ply':
+            # Parse header text only (no full scan)
+            n = None
+            with open(path, 'rb') as fh:
+                for _ in range(60):
+                    line = fh.readline().decode('ascii', 'ignore').strip()
+                    if line.startswith('element vertex'):
+                        n = int(line.split()[-1])
+                    if line == 'end_header':
+                        break
+            if n is not None:
+                info['point_count'] = n
+    except Exception as e:
+        info['error'] = str(e)
+    return JSONResponse(info)
+
+
 @app.get("/outputs")
 def list_outputs():
     """List existing inference output directories."""

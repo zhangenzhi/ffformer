@@ -284,8 +284,58 @@ header .dot.busy { background:var(--orange); animation:pulse 1.5s ease-in-out in
 body.page-analyze .main { display:none; }
 body.page-analyze .analysis-page { display:flex; }
 /* Import page: widen sidebar, de-emphasize viewer */
-body.page-import .viewer { opacity:0.35; pointer-events:none; }
-body.page-import .sidebar { width:420px; }
+.import-page { display:none; flex:1; overflow:hidden; }
+body.page-import .main { display:none; }
+body.page-import .import-page { display:flex; }
+
+/* ===== Media library (page 1) ===== */
+.media-main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.media-toolbar { padding:14px 20px; border-bottom:1px solid var(--border); display:flex;
+  align-items:center; gap:16px; flex-shrink:0; }
+.media-drop { flex:1; border:2px dashed var(--border); border-radius:var(--radius);
+  padding:12px 16px; display:flex; align-items:center; gap:12px; cursor:pointer;
+  transition:all 0.15s; }
+.media-drop:hover, .media-drop.dragover { border-color:var(--accent); background:rgba(88,166,255,0.05); }
+.media-drop .ic { font-size:24px; }
+.media-drop .txt { font-size:12px; color:var(--text2); }
+.media-drop .txt b { color:var(--text); display:block; font-size:13px; }
+.media-count { font-size:12px; color:var(--text2); white-space:nowrap; }
+.media-grid { flex:1; overflow-y:auto; padding:20px; display:grid;
+  grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:14px; align-content:start; }
+.media-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius);
+  overflow:hidden; cursor:pointer; transition:all 0.15s; display:flex; flex-direction:column; }
+.media-card:hover { border-color:var(--accent); transform:translateY(-2px); }
+.media-card.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.media-thumb { height:110px; background:var(--bg); display:flex; align-items:center;
+  justify-content:center; border-bottom:1px solid var(--border); position:relative; }
+.media-thumb svg { width:100%; height:100%; }
+.media-badge { position:absolute; top:6px; left:6px; font-size:9px; font-weight:700;
+  padding:2px 6px; border-radius:4px; letter-spacing:0.5px; }
+.media-badge.las { background:rgba(88,166,255,0.2); color:var(--accent); }
+.media-badge.laz { background:rgba(63,185,80,0.2); color:var(--green); }
+.media-badge.ply { background:rgba(210,153,34,0.2); color:var(--orange); }
+.media-badge.done { position:absolute; top:6px; right:6px; left:auto;
+  background:rgba(63,185,80,0.2); color:var(--green); }
+.media-meta { padding:10px 12px; }
+.media-meta .mname { font-size:12px; font-weight:600; color:var(--text); white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; margin-bottom:6px; }
+.media-meta .mrow { font-size:10px; color:var(--text2); display:flex; justify-content:space-between;
+  line-height:1.6; }
+.media-meta .mrow .v { color:var(--text); font-variant-numeric:tabular-nums; }
+
+.media-inspector { width:320px; background:var(--bg2); border-left:1px solid var(--border);
+  flex-shrink:0; display:flex; flex-direction:column; padding:20px; overflow-y:auto; }
+.media-inspector .mi-empty { margin:auto; text-align:center; color:var(--text2); font-size:12px; }
+.media-inspector h3 { font-size:14px; color:#e6edf3; margin-bottom:4px; word-break:break-all; }
+.media-inspector .mi-sub { font-size:11px; color:var(--text2); margin-bottom:16px; }
+.mi-thumb { height:160px; background:var(--bg); border:1px solid var(--border);
+  border-radius:var(--radius); margin-bottom:16px; }
+.mi-thumb svg { width:100%; height:100%; }
+.mi-specs { display:flex; flex-direction:column; gap:8px; margin-bottom:20px; }
+.mi-spec { display:flex; justify-content:space-between; font-size:12px;
+  padding-bottom:8px; border-bottom:1px solid var(--border); }
+.mi-spec .k { color:var(--text2); }
+.mi-spec .v { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
 
 /* ===== Analysis page ===== */
 .analysis-page { flex-direction:row; }
@@ -466,6 +516,25 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <div class="hw-title">Hardware</div>
       <div class="hw-content" id="hwContent">Loading...</div>
     </div>
+  </div>
+</div>
+
+<!-- ==================== PAGE 1: 数据导入 (媒体库) ==================== -->
+<div class="import-page">
+  <div class="media-main">
+    <div class="media-toolbar">
+      <div class="media-drop" id="mediaDrop">
+        <span class="ic">&#x1F4E5;</span>
+        <span class="txt"><b>拖入 LAS / LAZ / PLY 点云</b>或点击选择文件导入媒体库</span>
+      </div>
+      <input type="file" id="mediaFileInput" accept=".las,.laz,.ply" hidden>
+      <button class="btn-sm" onclick="refreshMediaLibrary()">刷新服务器数据</button>
+      <span class="media-count" id="mediaCount">—</span>
+    </div>
+    <div class="media-grid" id="mediaGrid"></div>
+  </div>
+  <div class="media-inspector" id="mediaInspector">
+    <div class="mi-empty">选择一个数据集查看详情</div>
   </div>
 </div>
 
@@ -1903,6 +1972,7 @@ function switchPage(page) {
   document.getElementById('pageSegment').classList.toggle('active', page === 'segment');
   document.getElementById('pageAnalyze').classList.toggle('active', page === 'analyze');
   if (page === 'analyze') refreshAnalysisPage();
+  if (page === 'import') refreshMediaLibrary();
 }
 
 async function refreshAnalysisPage() {
@@ -2110,6 +2180,192 @@ async function analyzeTree(treeId) {
     body.innerHTML = `<span style="color:#f85149">分析失败: ${e.message}</span>`;
   }
 }
+
+// ==================== MEDIA LIBRARY (page 1) ====================
+let mediaItems = [];
+let selectedMediaId = null;
+
+// Parse a LAS/LAZ header client-side (first 400 bytes) — no upload needed.
+async function parseLasHeader(file) {
+  try {
+    const buf = await file.slice(0, 400).arrayBuffer();
+    const dv = new DataView(buf);
+    const sig = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+    if (sig !== 'LASF') return null;
+    const vMajor = dv.getUint8(24), vMinor = dv.getUint8(25);
+    let pc = dv.getUint32(107, true);
+    if (pc === 0 && vMinor >= 4) pc = Number(dv.getBigUint64(247, true));
+    const maxx=dv.getFloat64(179,true), minx=dv.getFloat64(187,true);
+    const maxy=dv.getFloat64(195,true), miny=dv.getFloat64(203,true);
+    const maxz=dv.getFloat64(211,true), minz=dv.getFloat64(219,true);
+    return { point_count:pc, extent_x:+(maxx-minx).toFixed(1),
+      extent_y:+(maxy-miny).toFixed(1), extent_z:+(maxz-minz).toFixed(1),
+      version:`${vMajor}.${vMinor}` };
+  } catch(e) { return null; }
+}
+
+// A footprint "thumbnail": rectangle proportional to the plot's XY extent.
+function footprintSvg(ex, ey, color) {
+  color = color || 'var(--accent)';
+  if (!ex || !ey) return `<svg viewBox="0 0 100 100"><text x="50" y="55" text-anchor="middle" fill="#8b949e" font-size="30">&#x2601;</text></svg>`;
+  const pad = 16, maxd = Math.max(ex, ey), w = (ex/maxd)*(100-2*pad), h = (ey/maxd)*(100-2*pad);
+  const x = (100-w)/2, y = (100-h)/2;
+  return `<svg viewBox="0 0 100 100">
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${color}" fill-opacity="0.12"
+      stroke="${color}" stroke-width="1.5" rx="2"/>
+    <text x="50" y="94" text-anchor="middle" fill="#8b949e" font-size="8">${ex}&#xD7;${ey}m</text>
+  </svg>`;
+}
+
+async function refreshMediaLibrary() {
+  const grid = document.getElementById('mediaGrid');
+  // Keep any locally-added items; rebuild server + task items
+  const localItems = mediaItems.filter(m => m.source === 'local');
+  mediaItems = [...localItems];
+
+  // Completed tasks as "已处理" items
+  for (const [tid, t] of Object.entries(taskData)) {
+    if (t.status === 'completed') {
+      const st = t.stats || {};
+      mediaItems.push({ id:'task:'+tid, source:'task', taskId:tid,
+        name:t.filename||tid, format:(t.filename||'').split('.').pop().toLowerCase(),
+        point_count:st.n_processed, n_trees:st.n_trees });
+    }
+  }
+
+  renderMediaGrid();
+
+  // Server data files
+  try {
+    const resp = await fetch(`${API}/data`);
+    const files = await resp.json();
+    for (const f of files) {
+      const id = 'server:'+f.path;
+      if (mediaItems.some(m => m.id === id)) continue;
+      const item = { id, source:'server', path:f.path, name:f.filename,
+        format:f.type, size:f.size };
+      mediaItems.push(item);
+      renderMediaGrid();
+      // Lazy header fetch to enrich card
+      fetch(`${API}/data/meta?path=${encodeURIComponent(f.path)}`)
+        .then(r=>r.json()).then(meta=>{ Object.assign(item, meta); renderMediaGrid();
+          if (selectedMediaId===id) renderMediaInspector(); }).catch(()=>{});
+    }
+  } catch(e) { console.error('data list failed', e); }
+  renderMediaGrid();
+}
+
+function renderMediaGrid() {
+  const grid = document.getElementById('mediaGrid');
+  document.getElementById('mediaCount').textContent = `${mediaItems.length} 个数据集`;
+  if (!mediaItems.length) {
+    grid.innerHTML = '<div class="files-empty" style="color:#8b949e;font-size:12px;grid-column:1/-1;padding:20px">暂无数据。拖入点云文件,或点「刷新服务器数据」。</div>';
+    return;
+  }
+  let html = '';
+  for (const m of mediaItems) {
+    const fmt = (m.format||'').toLowerCase();
+    const badgeCls = ['las','laz','ply'].includes(fmt) ? fmt : 'las';
+    const color = fmt==='laz'?'var(--green)':fmt==='ply'?'var(--orange)':'var(--accent)';
+    const doneBadge = m.source==='task' ? '<span class="media-badge done">&#x2713; 已处理</span>' : '';
+    const pc = m.point_count!=null ? m.point_count.toLocaleString() : '—';
+    const ext = (m.extent_x&&m.extent_y) ? `${m.extent_x}&#xD7;${m.extent_y}m` : (m.n_trees!=null?`${m.n_trees} 棵树`:'—');
+    const sz = m.size!=null ? formatFileSize(m.size) : (m.file?formatFileSize(m.file.size):'—');
+    html += `<div class="media-card ${m.id===selectedMediaId?'sel':''}" onclick="selectMediaItem('${m.id.replace(/'/g,"\\'")}')">
+      <div class="media-thumb">
+        <span class="media-badge ${badgeCls}">${(fmt||'?').toUpperCase()}</span>${doneBadge}
+        ${footprintSvg(m.extent_x, m.extent_y, color)}
+      </div>
+      <div class="media-meta">
+        <div class="mname" title="${m.name}">${m.name}</div>
+        <div class="mrow"><span>点数</span><span class="v">${pc}</span></div>
+        <div class="mrow"><span>${m.source==='task'?'结果':'范围'}</span><span class="v">${ext}</span></div>
+        <div class="mrow"><span>大小</span><span class="v">${sz}</span></div>
+      </div>
+    </div>`;
+  }
+  grid.innerHTML = html;
+}
+
+function selectMediaItem(id) {
+  selectedMediaId = id;
+  renderMediaGrid();
+  renderMediaInspector();
+}
+
+function renderMediaInspector() {
+  const insp = document.getElementById('mediaInspector');
+  const m = mediaItems.find(x => x.id === selectedMediaId);
+  if (!m) { insp.innerHTML = '<div class="mi-empty">选择一个数据集查看详情</div>'; return; }
+  const fmt = (m.format||'').toLowerCase();
+  const color = fmt==='laz'?'var(--green)':fmt==='ply'?'var(--orange)':'var(--accent)';
+  const pc = m.point_count!=null ? m.point_count.toLocaleString() : '—';
+  const sz = m.size!=null ? formatFileSize(m.size) : (m.file?formatFileSize(m.file.size):'—');
+  let specs = `<div class="mi-spec"><span class="k">格式</span><span class="v">${(fmt||'?').toUpperCase()}</span></div>
+    <div class="mi-spec"><span class="k">点数</span><span class="v">${pc}</span></div>
+    <div class="mi-spec"><span class="k">文件大小</span><span class="v">${sz}</span></div>`;
+  if (m.extent_x) specs += `<div class="mi-spec"><span class="k">平面范围</span><span class="v">${m.extent_x}&#xD7;${m.extent_y} m</span></div>
+    <div class="mi-spec"><span class="k">高差</span><span class="v">${m.extent_z} m</span></div>`;
+  if (m.version) specs += `<div class="mi-spec"><span class="k">LAS 版本</span><span class="v">${m.version}</span></div>`;
+  if (m.n_trees!=null) specs += `<div class="mi-spec"><span class="k">检测树木</span><span class="v">${m.n_trees} 棵</span></div>`;
+
+  let action;
+  if (m.source === 'task') {
+    action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">查看结果 &amp; 分析</button>`;
+  } else {
+    action = `<button class="btn btn-primary" onclick="sendToSegment('${m.id.replace(/'/g,"\\'")}')">&#x1F332; 送去分割</button>`;
+  }
+  insp.innerHTML = `<h3>${m.name}</h3>
+    <div class="mi-sub">${m.source==='local'?'本地文件(待上传)':m.source==='task'?'已完成任务':'服务器数据'}</div>
+    <div class="mi-thumb">${footprintSvg(m.extent_x, m.extent_y, color)}</div>
+    <div class="mi-specs">${specs}</div>${action}`;
+}
+
+async function addLocalFile(file) {
+  const ext = '.'+file.name.split('.').pop().toLowerCase();
+  const id = 'local:'+file.name+':'+file.size;
+  if (mediaItems.some(m => m.id === id)) { selectMediaItem(id); return; }
+  const item = { id, source:'local', file, name:file.name,
+    format:ext.slice(1), size:file.size };
+  mediaItems.unshift(item);
+  renderMediaGrid();
+  if (ext === '.las' || ext === '.laz') {
+    const h = await parseLasHeader(file);
+    if (h) { Object.assign(item, h); renderMediaGrid(); }
+  }
+  selectMediaItem(id);
+}
+
+function sendToSegment(id) {
+  const m = mediaItems.find(x => x.id === id);
+  if (!m) return;
+  switchPage('segment');
+  if (m.source === 'local') {
+    selectFile(m.file);
+    setTimeout(() => uploadBtn.click(), 100);
+  } else if (m.source === 'server') {
+    runDataInference(m.path);
+  }
+}
+
+function viewTaskResult(tid) {
+  switchPage('segment');
+  selectTask(tid);
+}
+
+// Media page drop zone
+const mediaDrop = document.getElementById('mediaDrop');
+const mediaFileInput = document.getElementById('mediaFileInput');
+mediaDrop.addEventListener('click', () => mediaFileInput.click());
+mediaDrop.addEventListener('dragover', e => { e.preventDefault(); mediaDrop.classList.add('dragover'); });
+mediaDrop.addEventListener('dragleave', () => mediaDrop.classList.remove('dragover'));
+mediaDrop.addEventListener('drop', e => {
+  e.preventDefault(); mediaDrop.classList.remove('dragover');
+  if (e.dataTransfer.files.length) addLocalFile(e.dataTransfer.files[0]);
+});
+mediaFileInput.addEventListener('change', () => {
+  if (mediaFileInput.files.length) addLocalFile(mediaFileInput.files[0]);
+});
 
 // ==================== INIT ====================
 document.body.classList.add('page-segment');
