@@ -329,6 +329,31 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--border);
   border-top-color:var(--accent); border-radius:50%; animation:rot 0.8s linear infinite; }
 @keyframes rot { to { transform:rotate(360deg); } }
+
+/* ===== Scopes (charts) ===== */
+.analysis-main { overflow-y:auto; }
+.scopes { display:grid; grid-template-columns:1fr 1fr; gap:16px; flex-shrink:0; }
+.scope { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius);
+  padding:12px 14px; display:flex; flex-direction:column; }
+.scope .sc-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+.scope .sc-head h4 { font-size:12px; color:#e6edf3; font-weight:600; }
+.scope .sc-head .sc-sub { font-size:10px; color:var(--text2); margin-left:auto; }
+.scope svg { width:100%; height:170px; display:block; overflow:visible; }
+.scope .sc-axis { stroke:var(--border); stroke-width:1; }
+.scope .sc-grid { stroke:var(--border); stroke-width:1; stroke-dasharray:2 3; opacity:0.5; }
+.scope .sc-tick { fill:var(--text2); font-size:9px; }
+.scope .sc-atitle { fill:var(--text2); font-size:9px; text-transform:uppercase; letter-spacing:0.4px; }
+.scope .sc-bar { fill:var(--accent); transition:fill 0.1s; }
+.scope .sc-bar:hover { fill:#79b8ff; }
+.scope .sc-dot { transition:r 0.1s; cursor:pointer; }
+.scope .sc-dot:hover { stroke:#fff; stroke-width:1.5; }
+.scope-legend { display:flex; gap:12px; margin-top:6px; font-size:10px; color:var(--text2);
+  flex-wrap:wrap; }
+.scope-legend span { display:inline-flex; align-items:center; gap:4px; }
+.scope-legend i { width:8px; height:8px; border-radius:2px; display:inline-block; }
+.sc-tip { position:fixed; pointer-events:none; background:var(--bg3); border:1px solid var(--border);
+  border-radius:4px; padding:5px 8px; font-size:11px; color:var(--text); z-index:100;
+  display:none; white-space:nowrap; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
 </style>
 </head>
 <body>
@@ -462,6 +487,21 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <div class="big">&#x1F916;</div>
       <p>选择一个已完成的分割任务开始 AI 分析</p>
     </div>
+    <div class="scopes" id="scopes" style="display:none">
+      <div class="scope">
+        <div class="sc-head"><h4>树高分布</h4><span class="sc-sub" id="histSub"></span></div>
+        <svg id="histSvg" viewBox="0 0 440 170"></svg>
+      </div>
+      <div class="scope">
+        <div class="sc-head"><h4>叶木比 × 树高</h4><span class="sc-sub">点击散点做单株分析</span></div>
+        <svg id="scatSvg" viewBox="0 0 440 170"></svg>
+        <div class="scope-legend">
+          <span><i style="background:var(--orange)"></i>稀疏冠层(叶木比&lt;15)</span>
+          <span><i style="background:var(--green)"></i>正常</span>
+          <span><i style="background:var(--accent)"></i>密集(&gt;120)</span>
+        </div>
+      </div>
+    </div>
     <div class="llm-card scene-card" id="sceneCard" style="display:none">
       <div class="lc-head">
         <h3>林分整体评估</h3>
@@ -492,6 +532,8 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
     <span class="pico">&#x1F916;</span><span><span class="pnum">3 </span>智能分析</span>
   </button>
 </div>
+
+<div class="sc-tip" id="scTip"></div>
 
 <!-- Log Viewer Modal -->
 <div class="log-overlay hidden" id="logOverlay" onclick="if(event.target===this)closeLog()">
@@ -1870,6 +1912,7 @@ async function refreshAnalysisPage() {
   const t = taskData[activeTaskId];
   if (!activeTaskId || !t || t.status !== 'completed') {
     empty.style.display = ''; sceneCard.style.display = 'none'; treeCard.style.display = 'none';
+    document.getElementById('scopes').style.display = 'none';
     document.getElementById('treeCount').textContent = '—';
     document.getElementById('treeTableWrap').innerHTML =
       '<div class="files-empty" style="padding:20px;color:#8b949e;font-size:12px">在「分割」页选择一个已完成的任务,再切到本页查看逐树指标。</div>';
@@ -1902,6 +1945,104 @@ async function loadTreeTable(tid) {
     }
   }
   renderTreeTable();
+  renderCharts();
+}
+
+// ---- Scopes (inline SVG charts) ----
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function healthColor(lw) {
+  if (lw === null || lw === undefined) return 'var(--text2)';
+  if (lw < 15) return 'var(--orange)';
+  if (lw > 120) return 'var(--accent)';
+  return 'var(--green)';
+}
+const scTip = () => document.getElementById('scTip');
+function showTip(evt, html) {
+  const t = scTip(); t.innerHTML = html; t.style.display = 'block';
+  t.style.left = (evt.clientX + 12) + 'px'; t.style.top = (evt.clientY - 8) + 'px';
+}
+function hideTip() { scTip().style.display = 'none'; }
+
+function renderCharts() {
+  if (!treeMetrics || !treeMetrics.trees.length) { document.getElementById('scopes').style.display = 'none'; return; }
+  document.getElementById('scopes').style.display = 'grid';
+  renderHistogram();
+  renderScatter();
+}
+
+// Plot area within the 320x170 viewBox
+const PLOT = { x0: 40, y0: 10, x1: 430, y1: 146 };
+
+function renderHistogram() {
+  const heights = treeMetrics.trees.map(t => t.height_m);
+  const hmax = Math.max(...heights);
+  const nbins = Math.min(12, Math.max(5, Math.ceil(Math.sqrt(heights.length))));
+  const binW = hmax / nbins;
+  const bins = new Array(nbins).fill(0);
+  for (const h of heights) bins[Math.min(nbins - 1, Math.floor(h / binW))]++;
+  const cmax = Math.max(...bins);
+  document.getElementById('histSub').textContent = `${heights.length} 棵 · 0–${hmax.toFixed(0)}m`;
+
+  const svg = document.getElementById('histSvg');
+  svg.innerHTML = '';
+  const pw = PLOT.x1 - PLOT.x0, ph = PLOT.y1 - PLOT.y0;
+  // y gridlines + ticks
+  for (let g = 0; g <= 2; g++) {
+    const yv = Math.round(cmax * g / 2);
+    const y = PLOT.y1 - (yv / cmax) * ph;
+    svg.appendChild(svgEl('line', {class:'sc-grid', x1:PLOT.x0, y1:y, x2:PLOT.x1, y2:y}));
+    const tk = svgEl('text', {class:'sc-tick', x:PLOT.x0-5, y:y+3, 'text-anchor':'end'}); tk.textContent = yv; svg.appendChild(tk);
+  }
+  svg.appendChild(svgEl('line', {class:'sc-axis', x1:PLOT.x0, y1:PLOT.y1, x2:PLOT.x1, y2:PLOT.y1}));
+  const bw = pw / nbins;
+  for (let i = 0; i < nbins; i++) {
+    if (!bins[i]) continue;
+    const bh = (bins[i] / cmax) * ph;
+    const x = PLOT.x0 + i * bw + 2;
+    const bar = svgEl('rect', {class:'sc-bar', x, y:PLOT.y1 - bh, width:Math.max(1, bw - 4), height:bh, rx:3});
+    const lo = (i*binW).toFixed(0), hi = ((i+1)*binW).toFixed(0);
+    bar.addEventListener('mousemove', e => showTip(e, `${lo}–${hi} m<br><b>${bins[i]}</b> 棵`));
+    bar.addEventListener('mouseleave', hideTip);
+    svg.appendChild(bar);
+  }
+  // x tick labels (min/max)
+  const t0 = svgEl('text', {class:'sc-tick', x:PLOT.x0, y:PLOT.y1+12}); t0.textContent = '0'; svg.appendChild(t0);
+  const t1 = svgEl('text', {class:'sc-tick', x:PLOT.x1, y:PLOT.y1+12, 'text-anchor':'end'}); t1.textContent = hmax.toFixed(0)+'m'; svg.appendChild(t1);
+  const at = svgEl('text', {class:'sc-atitle', x:PLOT.x0, y:PLOT.y0-0, 'text-anchor':'start'}); at.textContent = '棵数'; svg.appendChild(at);
+}
+
+function renderScatter() {
+  const trees = treeMetrics.trees.filter(t => t.leaf_wood_ratio !== null);
+  if (!trees.length) { document.getElementById('scatSvg').innerHTML = ''; return; }
+  const xs = trees.map(t => t.height_m), ys = trees.map(t => t.leaf_wood_ratio);
+  const xmax = Math.max(...xs), ymax = Math.max(...ys);
+  const svg = document.getElementById('scatSvg');
+  svg.innerHTML = '';
+  const pw = PLOT.x1 - PLOT.x0, ph = PLOT.y1 - PLOT.y0;
+  for (let g = 0; g <= 2; g++) {
+    const yv = ymax * g / 2;
+    const y = PLOT.y1 - (yv / ymax) * ph;
+    svg.appendChild(svgEl('line', {class:'sc-grid', x1:PLOT.x0, y1:y, x2:PLOT.x1, y2:y}));
+    const tk = svgEl('text', {class:'sc-tick', x:PLOT.x0-5, y:y+3, 'text-anchor':'end'}); tk.textContent = yv.toFixed(0); svg.appendChild(tk);
+  }
+  svg.appendChild(svgEl('line', {class:'sc-axis', x1:PLOT.x0, y1:PLOT.y1, x2:PLOT.x1, y2:PLOT.y1}));
+  for (const t of trees) {
+    const cx = PLOT.x0 + (t.height_m / xmax) * pw;
+    const cy = PLOT.y1 - (t.leaf_wood_ratio / ymax) * ph;
+    const dot = svgEl('circle', {class:'sc-dot', cx, cy, r:4, fill:healthColor(t.leaf_wood_ratio),
+      'fill-opacity':0.85, stroke:'var(--bg2)', 'stroke-width':1});
+    dot.addEventListener('mousemove', e => showTip(e, `#${t.id} · 高 ${t.height_m}m<br>叶木比 <b>${t.leaf_wood_ratio}</b> · 置信 ${t.mean_score}`));
+    dot.addEventListener('mouseleave', hideTip);
+    dot.addEventListener('click', () => { hideTip(); analyzeTree(t.id); });
+    svg.appendChild(dot);
+  }
+  const tx = svgEl('text', {class:'sc-tick', x:PLOT.x1, y:PLOT.y1+12, 'text-anchor':'end'}); tx.textContent = xmax.toFixed(0)+'m'; svg.appendChild(tx);
+  const at = svgEl('text', {class:'sc-atitle', x:PLOT.x0, y:PLOT.y0-0}); at.textContent = '叶木比'; svg.appendChild(at);
 }
 
 function lwColor(r) {
