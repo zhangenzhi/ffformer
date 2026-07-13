@@ -288,6 +288,28 @@ body.page-analyze .analysis-page { display:flex; }
 body.page-import .main { display:none; }
 body.page-import .import-page { display:flex; }
 
+/* Page 2 (分割) focuses on the running task + 3D result: import controls
+   (upload zone, data/files browsers) belong to page 1 and are hidden here. */
+body.page-segment .drop-area,
+body.page-segment .upload-params,
+body.page-segment #uploadBtn,
+body.page-segment .sidebar-tabs,
+body.page-segment #dataPanel,
+body.page-segment #filesPanel { display:none !important; }
+.sidebar-hint { padding:14px 16px; font-size:11px; color:var(--text2); line-height:1.6;
+  border-bottom:1px solid var(--border); }
+.sidebar-hint b { color:var(--text); }
+
+/* 3D viewer semantic legend */
+.viewer-legend { position:absolute; bottom:52px; left:16px; background:rgba(22,27,34,0.9);
+  border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:11px;
+  display:none; z-index:5; backdrop-filter:blur(4px); }
+.viewer-legend.show { display:block; }
+.viewer-legend .vl-title { color:var(--text2); font-size:9px; text-transform:uppercase;
+  letter-spacing:0.5px; margin-bottom:5px; }
+.viewer-legend .vl-item { display:flex; align-items:center; gap:6px; line-height:1.8; color:var(--text); }
+.viewer-legend .vl-sw { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
+
 /* ===== Media library (page 1) ===== */
 .media-main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
 .media-toolbar { padding:14px 20px; border-bottom:1px solid var(--border); display:flex;
@@ -427,6 +449,9 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       </div>
       <div class="config-meta" id="modelMeta"></div>
     </div>
+    <div class="sidebar-hint">
+      在 <b>&#x1F4E5; 数据导入</b> 页选择点云并「送去分割」。本页显示分割运行状态与 3D 结果。
+    </div>
     <div class="upload-zone">
       <div class="drop-area" id="dropArea">
         <div class="icon">&#x1F332;</div>
@@ -509,6 +534,14 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <span id="infoPoints"></span>
       <span class="sep">|</span>
       <span id="infoTime"></span>
+    </div>
+
+    <!-- Semantic color legend -->
+    <div class="viewer-legend" id="viewerLegend">
+      <div class="vl-title">语义分类</div>
+      <div class="vl-item"><span class="vl-sw" style="background:rgb(139,119,101)"></span>地面 Ground</div>
+      <div class="vl-item"><span class="vl-sw" style="background:rgb(210,150,60)"></span>木质 Wood</div>
+      <div class="vl-item"><span class="vl-sw" style="background:rgb(34,180,34)"></span>叶片 Leaf</div>
     </div>
 
     <!-- Hardware spec panel -->
@@ -1163,6 +1196,7 @@ function initViewer() {
   };
   document.getElementById('vColorMode').onchange = function(){
     if(currentPlyData) recolorPoints(this.value);
+    updateLegend(this.value);
   };
 
   onResize();
@@ -1261,6 +1295,7 @@ function loadPlyInViewer(plyText) {
   document.getElementById('viewerEmpty').style.display='none';
   document.getElementById('viewer3d').style.display='block';
   document.getElementById('viewerToolbar').style.display='block';
+  updateLegend(document.getElementById('vColorMode').value);
   document.getElementById('infoBar').style.display='flex';
   document.getElementById('vPsize').value=30;
   onResize();
@@ -1278,6 +1313,12 @@ function colorPoints(rows, col, colors, mode) {
     }
     colors[i*3]=c[0]/255; colors[i*3+1]=c[1]/255; colors[i*3+2]=c[2]/255;
   }
+}
+
+function updateLegend(mode) {
+  const legend = document.getElementById('viewerLegend');
+  const viewerOn = document.getElementById('viewer3d').style.display !== 'none';
+  legend.classList.toggle('show', mode === 'semantic' && viewerOn);
 }
 
 function recolorPoints(mode) {
@@ -1335,6 +1376,7 @@ function loadStreamingViewer(taskId, meta) {
   document.getElementById('viewerEmpty').style.display='none';
   document.getElementById('viewer3d').style.display='block';
   document.getElementById('viewerToolbar').style.display='block';
+  updateLegend(document.getElementById('vColorMode').value);
   document.getElementById('infoBar').style.display='flex';
   document.getElementById('vPsize').value=30;
   onResize();
@@ -1760,6 +1802,13 @@ function updateHardwarePanel(data) {
       html += row('Power', g.power_w.toFixed(0) + ' / ' + g.power_limit_w.toFixed(0) + ' W');
     }
     html += '</div>';
+  } else if (data.gpu_location === 'hpc') {
+    html += '<div class="hw-gpu">HPC GPU 集群</div>';
+    html += row('推理位置', 'NVIDIA H100 · PBS');
+    html += row('状态', data.model_loaded
+      ? '<span style="color:var(--orange)">运行中</span>'
+      : '<span style="color:var(--text2)">空闲</span>');
+    html += '<div class="hw-section" style="font-size:10px;color:var(--text2);padding-top:4px">任务运行时显示计算节点实时遥测</div>';
   } else {
     html += '<div class="hw-nogpu">No GPU</div>';
   }
@@ -1795,9 +1844,13 @@ function updateHardwarePanel(data) {
 // Update hardware panel from lightweight task poll data (works even when /health is slow)
 function updateHardwareFromPoll(hw) {
   _hwSource = 'poll';
-  const el = document.getElementById('hwContent');
   const row = (label, val) => `<div class="hw-row"><span class="hw-label">${label}</span><span class="hw-val">${val}</span></div>`;
-  let html = '<div class="hw-section-title" style="color:var(--orange)">Live · Inference Running</div>';
+  // HPC telemetry carries a node/gpu_name; the local backend does not.
+  const onHpc = hw.node || hw.gpu_name || hw.job_id;
+  let html = `<div class="hw-section-title" style="color:var(--orange)">${onHpc ? 'Live · HPC GPU' : 'Live · Inference Running'}</div>`;
+  if (hw.gpu_name) html += `<div class="hw-gpu">${hw.gpu_name}</div>`;
+  if (hw.node) html += row('节点', hw.node);
+  if (hw.job_id) html += row('作业', hw.job_id);
 
   if (hw.gpu_util_pct != null) {
     html += utilBar('GPU', hw.gpu_util_pct);
@@ -1808,6 +1861,9 @@ function updateHardwareFromPoll(hw) {
   }
   if (hw.temp_c != null) {
     html += row('Temp', hw.temp_c + ' °C');
+  }
+  if (hw.power_w != null) {
+    html += row('Power', hw.power_w.toFixed(0) + ' W');
   }
   if (hw.cpu_used_pct != null) {
     html += utilBar('CPU', hw.cpu_used_pct);
@@ -1919,6 +1975,7 @@ async function loadTilePreview(taskId, tileIdx) {
       document.getElementById('viewerEmpty').style.display = 'none';
       document.getElementById('viewer3d').style.display = 'block';
       document.getElementById('viewerToolbar').style.display = 'block';
+      updateLegend(document.getElementById('vColorMode').value);
       if (pointsMesh) { scene.remove(pointsMesh); pointsMesh = null; }
 
       cx /= nVerts; cy /= nVerts; cz /= nVerts;

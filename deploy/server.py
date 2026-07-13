@@ -558,6 +558,9 @@ def health():
     info = {
         "status": "ok",
         "backend": INFERENCE_BACKEND,
+        # With the HPC backend the GPU lives on the compute node, not the pod;
+        # the panel uses this to explain where inference actually runs.
+        "gpu_location": "hpc" if INFERENCE_BACKEND == "hpc" else "local",
         "model_loaded": any(t.get('status') == 'processing' for t in tasks.values()),
         "gpu_available": False,
         "system": {
@@ -727,9 +730,12 @@ def task_status(task_id: str):
         'step_times': task.get('step_times', {}),
     }
 
-    # Include real-time GPU/system stats for active tasks
+    # Include real-time GPU/system stats for active tasks.
+    # HPC backend supplies compute-node telemetry via the task dict; the local
+    # backend reads the pod's own nvidia-smi.
     if task['status'] == 'processing':
-        result['hw'] = _get_gpu_utilization()
+        result['hw'] = task.get('hw') or _get_gpu_utilization()
+        result['hpc_job_id'] = task.get('hpc_job_id')
         result['stats'] = task.get('stats', {})
         result['completed_tiles'] = task.get('completed_tiles', 0)
 

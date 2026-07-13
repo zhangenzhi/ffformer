@@ -268,10 +268,14 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
                 remote = json.loads(_sftp_read(sftp, status_rpath))
                 step = remote.get('step', 'inferring')
                 if step not in ('starting',):
+                    extra = {}
+                    if remote.get('hw'):
+                        extra['hw'] = {**remote['hw'], 'job_id': job_id}
                     _update(task_id, step,
                             progress=remote.get('progress'),
                             stats=remote.get('stats', {}),
-                            completed_tiles=remote.get('completed_tiles', 0))
+                            completed_tiles=remote.get('completed_tiles', 0),
+                            **extra)
             except FileNotFoundError:
                 if state == 'Q':
                     _update(task_id, 'queued', progress=8)

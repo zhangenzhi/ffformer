@@ -59,6 +59,30 @@ class StatusReporter:
         os.replace(tmp, self.status_path)
 
 
+def _gpu_stats():
+    """Capture compute-node GPU telemetry via nvidia-smi (no CUDA context)."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,'
+             'memory.total,temperature.gpu,power.draw',
+             '--format=csv,noheader,nounits', '-i', '0'],
+            capture_output=True, text=True, timeout=3)
+        if r.returncode != 0:
+            return None
+        p = [x.strip() for x in r.stdout.strip().split(',')]
+        return {
+            'gpu_name': p[0],
+            'gpu_util_pct': float(p[1]),
+            'vram_reserved_gb': round(float(p[2]) / 1024, 2),
+            'vram_total_gb': round(float(p[3]) / 1024, 1),
+            'temp_c': float(p[4]),
+            'power_w': float(p[5]),
+        }
+    except Exception:
+        return None
+
+
 def _read_ply_xyz(path):
     fields = []
     with open(path, 'r') as f:
@@ -199,11 +223,13 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
         max_instance_id = 0
         t_infer_start = time.time()
 
+        node = os.environ.get('HOSTNAME') or os.uname().nodename
         for i, tile in enumerate(tiles):
             progress = 20 + int(65 * i / n_tiles)
             rep.update('inferring', progress,
                        stats={**base_stats, 'current_tile': i + 1,
-                              'tile_points': tile['n_points']})
+                              'tile_points': tile['n_points']},
+                       hw={'node': node, **(_gpu_stats() or {})})
             rep.log(f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
 
             tile_xyz = xyz[tile['global_idx']]
