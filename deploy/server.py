@@ -81,10 +81,20 @@ def _ensure_paramiko():
     """Install paramiko at runtime if missing (image may predate HPC backend)."""
     try:
         import paramiko  # noqa: F401
+        return
     except ImportError:
-        import subprocess
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--user',
-                        '--quiet', 'paramiko'], check=True)
+        pass
+    import site
+    import subprocess
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '--user',
+                    '--quiet', 'paramiko'], check=True)
+    # If the user site dir didn't exist at interpreter startup, site.py
+    # skipped it — add it now so this process (and forked children) see
+    # the fresh install.
+    usersite = site.getusersitepackages()
+    if usersite not in sys.path:
+        sys.path.append(usersite)
+    import paramiko  # noqa: F401
 
 
 def _get_inference_target():
