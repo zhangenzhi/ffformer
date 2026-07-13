@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ffformer-public
+  namespace: c30636-default
+  labels:
+    app: ffformer-infer
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.31.229.16"
+spec:
+  type: LoadBalancer
+  selector:
+    workload.user.cattle.io/workloadselector: apps.deployment-c30636-default-ffformer-infer-base
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8000
+      protocol: TCP

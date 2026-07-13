@@ -1,0 +1,49 @@
+# Patch for the live ffformer-infer-base deployment: switch to HPC push-mode
+# inference. Apply with:
+#   kubectl patch deploy ffformer-infer-base -n c30636-default \
+#       --patch-file deploy/k8s-hpc-patch.yaml
+#
+# The SSH key comes from secret ffformer-hpc-ssh (created from
+# ~/.ssh/ffformer_k8s_ed25519 on the HPC login node).
+spec:
+  template:
+    spec:
+      volumes:
+        - name: data-vol
+          persistentVolumeClaim:
+            claimName: ffformer-pvc
+        - name: hpc-ssh
+          secret:
+            secretName: ffformer-hpc-ssh
+            defaultMode: 0400
+      containers:
+        - name: ffformer-infer-base
+          volumeMounts:
+            - name: data-vol
+              mountPath: /workspace/data
+            - name: hpc-ssh
+              mountPath: /secrets/hpc
+              readOnly: true
+          env:
+            - name: CHECKPOINT_PATH
+              value: /workspace/data/epoch_3000_fix.pth
+            - name: CONFIG_PATH
+              value: /app/configs/jpeaks_test.py
+            - name: RESULTS_DIR
+              value: /tmp/ffformer_results
+            - name: PYTHONPATH
+              value: /app
+            - name: INFERENCE_BACKEND
+              value: hpc
+            - name: HPC_HOST
+              value: 172.31.20.1
+            - name: HPC_USER
+              value: c30746
+            - name: HPC_KEY_PATH
+              value: /secrets/hpc/key
+            - name: HPC_WORKDIR
+              value: /lustre1/work/c30636/ffformer
+            - name: HPC_QUEUE
+              value: c30636g
+            - name: HPC_GROUP
+              value: c30636

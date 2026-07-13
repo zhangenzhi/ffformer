@@ -17,6 +17,14 @@ else
     echo "[entrypoint] Git fetch failed, using image code ($(git rev-parse --short HEAD 2>/dev/null || echo 'no commits'))"
 fi
 
+# HPC push-mode backend needs paramiko (fallback until baked into the image)
+if [ "${INFERENCE_BACKEND:-local}" = "hpc" ]; then
+    python -c "import paramiko" 2>/dev/null || {
+        echo "[entrypoint] Installing paramiko for HPC backend..."
+        pip install --user --quiet paramiko
+    }
+fi
+
 # Start API server
 echo "[entrypoint] Starting ForestFormer3D API server..."
 exec uvicorn deploy.server:app --host 0.0.0.0 --port 8000 --workers 1

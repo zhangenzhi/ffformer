@@ -399,7 +399,9 @@ def build_octree(filepath, output_dir, node_budget=50_000, max_depth=8):
 
     meta_path = os.path.join(output_dir, 'metadata.json')
     with open(meta_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+        # default handles numpy scalar types (int64/float32) leaking into the tree
+        json.dump(metadata, f, indent=2,
+                  default=lambda o: o.item() if hasattr(o, 'item') else str(o))
 
     print(f'  {time.time() - t0:.1f}s')
     print(f'  Total nodes: {len(hierarchy)}')

@@ -128,7 +128,8 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     fastapi==0.115.0 \
     uvicorn[standard]==0.30.0 \
-    python-multipart
+    python-multipart \
+    paramiko
 
 # ── Application code ────────────────────────────────────────────────
 WORKDIR /app

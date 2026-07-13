@@ -73,6 +73,17 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # Lazy-loaded engine (loads model on first request)
 _engine = None
 
+# Inference backend: 'local' = in-pod GPU/CPU, 'hpc' = push to PBS cluster via SSH
+INFERENCE_BACKEND = os.environ.get('INFERENCE_BACKEND', 'local')
+
+
+def _get_inference_target():
+    """Select the background inference function based on INFERENCE_BACKEND."""
+    if INFERENCE_BACKEND == 'hpc':
+        from deploy.hpc_backend import run_hpc_inference
+        return run_hpc_inference
+    return _run_inference_background
+
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -525,6 +536,7 @@ def health():
     import platform
     info = {
         "status": "ok",
+        "backend": INFERENCE_BACKEND,
         "model_loaded": any(t.get('status') == 'processing' for t in tasks.values()),
         "gpu_available": False,
         "system": {
@@ -647,7 +659,7 @@ async def predict(
 
     # Launch background process for inference (separate process = no GIL blocking API)
     proc = multiprocessing.Process(
-        target=_run_inference_background,
+        target=_get_inference_target(),
         args=(tasks, task_id, input_path, suffix, tile_size, overlap),
         daemon=True,
     )
@@ -656,6 +668,7 @@ async def predict(
     return JSONResponse({
         'task_id': task_id,
         'status': 'processing',
+        'backend': INFERENCE_BACKEND,
         'status_url': f'/task/{task_id}/status',
     })
 
@@ -1046,7 +1059,7 @@ def predict_data(req: _DataInferenceRequest):
     }
 
     proc = multiprocessing.Process(
-        target=_run_inference_background,
+        target=_get_inference_target(),
         args=(tasks, task_id, input_path, suffix, req.tile_size, req.overlap),
         daemon=True,
     )
@@ -1056,6 +1069,7 @@ def predict_data(req: _DataInferenceRequest):
         'task_id': task_id,
         'status': 'processing',
         'filename': filename,
+        'backend': INFERENCE_BACKEND,
         'status_url': f'/task/{task_id}/status',
     })
 
