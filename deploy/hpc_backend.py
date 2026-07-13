@@ -73,7 +73,9 @@ cd {workdir}
         --tile-size {tile_size} --overlap {overlap}
 rc=$?
 
-# Bundle results into one tar for a single fast SFTP download
+# Bundle results into one compressed tar for a single fast SFTP download.
+# The link to the pod is capped at ~1 Gbps; ASCII PLY compresses ~3x, so
+# pigz/gzip raises effective transfer speed accordingly.
 cd {rdir}
 files=""
 for f in result.ply stats.json inference.log status.json; do
@@ -83,7 +85,11 @@ done
 for f in tile_*_preview.ply; do
     [ -f "$f" ] && files="$files $f"
 done
-[ -n "$files" ] && tar cf result_bundle.tar $files
+if command -v pigz >/dev/null 2>&1; then
+    [ -n "$files" ] && tar cf - $files | pigz -1 > result_bundle.tar.gz
+else
+    [ -n "$files" ] && tar czf result_bundle.tar.gz $files
+fi
 
 exit $rc
 """
@@ -184,14 +190,31 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
         client = _connect()
         sftp = client.open_sftp()
 
-        # ── Upload input ──
+        # ── Compress + upload input ──
+        # The pod<->HPC link is capped at ~1 Gbps; LAZ compresses LAS ~3x
+        # in well under a second (lazrs is multithreaded), so convert first.
         _exec(client, f"mkdir -p {rdir}")
-        size_mb = os.path.getsize(input_path) / 1e6
+        upload_path, upload_suffix = input_path, suffix
+        if suffix == '.las':
+            try:
+                import laspy
+                laz_path = os.path.join(os.path.dirname(input_path), 'input.laz')
+                t0 = time.time()
+                laspy.read(input_path).write(laz_path)
+                ratio = os.path.getsize(input_path) / max(os.path.getsize(laz_path), 1)
+                _log(task_id, t_start,
+                     f"Compressed LAS->LAZ {ratio:.1f}x in {time.time() - t0:.1f}s")
+                upload_path, upload_suffix = laz_path, '.laz'
+            except Exception as e:
+                _log(task_id, t_start, f"LAZ compression skipped ({e}), sending raw")
+        size_mb = os.path.getsize(upload_path) / 1e6
         _log(task_id, t_start, f"Uploading input ({size_mb:.1f} MB) to {rdir}...")
         t0 = time.time()
-        sftp.put(input_path, posixpath.join(rdir, f'input{suffix}'))
+        sftp.put(upload_path, posixpath.join(rdir, f'input{upload_suffix}'))
         dt = time.time() - t0
         _log(task_id, t_start, f"Upload done ({size_mb / max(dt, 0.01):.0f} MB/s)")
+        if upload_path != input_path:
+            os.remove(upload_path)
         _update(task_id, 'uploading', progress=6)
 
         # ── Generate + submit PBS job ──
@@ -200,7 +223,7 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
             queue=HPC_QUEUE, select=HPC_SELECT, walltime=HPC_WALLTIME,
             group=HPC_GROUP,
             workdir=HPC_WORKDIR, sif=HPC_SIF, rdir=rdir, task_id=task_id,
-            suffix=suffix, tile_size=tile_size, overlap=overlap,
+            suffix=upload_suffix, tile_size=tile_size, overlap=overlap,
         )
         with sftp.open(posixpath.join(rdir, 'job.pbs'), 'w') as f:
             f.write(script)
@@ -284,8 +307,8 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
 
         # ── Download results ──
         _update(task_id, 'downloading', progress=94)
-        bundle_r = posixpath.join(rdir, 'result_bundle.tar')
-        bundle_l = os.path.join(local_task_dir, 'result_bundle.tar')
+        bundle_r = posixpath.join(rdir, 'result_bundle.tar.gz')
+        bundle_l = os.path.join(local_task_dir, 'result_bundle.tar.gz')
         # tar is written by the PBS epilogue right after python exits; wait briefly
         for _ in range(30):
             try:
@@ -294,7 +317,7 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
             except FileNotFoundError:
                 time.sleep(2)
         else:
-            raise FileNotFoundError(f"result_bundle.tar not found in {rdir}")
+            raise FileNotFoundError(f"result_bundle.tar.gz not found in {rdir}")
 
         _log(task_id, t_start, f"Downloading results ({bsize / 1e6:.1f} MB)...")
         t0 = time.time()
@@ -302,7 +325,7 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
         dt = time.time() - t0
         _log(task_id, t_start, f"Download done ({bsize / 1e6 / max(dt, 0.01):.0f} MB/s)")
 
-        with tarfile.open(bundle_l) as tar:
+        with tarfile.open(bundle_l, 'r:gz') as tar:
             tar.extractall(local_task_dir)
         os.remove(bundle_l)
 
