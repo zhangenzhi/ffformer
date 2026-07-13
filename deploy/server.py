@@ -859,6 +859,64 @@ def download_json(task_id: str):
     })
 
 
+@app.get("/result/{task_id}/trees")
+def result_trees(task_id: str):
+    """Per-tree metrics computed from the result PLY (cached as trees.json)."""
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    ply_path = os.path.join(task_dir, 'result.ply')
+    if not os.path.isfile(ply_path):
+        raise HTTPException(404, "No result for this task")
+    from deploy.tree_analysis import compute_tree_metrics
+    cache = os.path.join(task_dir, 'trees.json')
+    try:
+        return JSONResponse(compute_tree_metrics(ply_path, cache_path=cache))
+    except Exception as e:
+        raise HTTPException(500, f"Tree metric computation failed: {e}")
+
+
+@app.post("/analyze/{task_id}")
+def analyze_scene_endpoint(task_id: str, lang: str = 'zh'):
+    """LLM stand-level analysis of the whole scene via in-cluster Ollama."""
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    ply_path = os.path.join(task_dir, 'result.ply')
+    if not os.path.isfile(ply_path):
+        raise HTTPException(404, "No result for this task")
+    from deploy import tree_analysis
+    if not tree_analysis.ollama_available():
+        raise HTTPException(503, "LLM service (Ollama) unavailable")
+    try:
+        metrics = tree_analysis.compute_tree_metrics(
+            ply_path, cache_path=os.path.join(task_dir, 'trees.json'))
+        stats = tasks.get(task_id, {}).get('stats', {})
+        text = tree_analysis.analyze_scene(metrics, stats=stats, lang=lang)
+        return JSONResponse({'task_id': task_id, 'analysis': text,
+                             'n_trees': metrics['n_trees']})
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {e}")
+
+
+@app.post("/analyze/{task_id}/tree/{tree_id}")
+def analyze_tree_endpoint(task_id: str, tree_id: int, lang: str = 'zh'):
+    """LLM health assessment for a single tree."""
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    ply_path = os.path.join(task_dir, 'result.ply')
+    if not os.path.isfile(ply_path):
+        raise HTTPException(404, "No result for this task")
+    from deploy import tree_analysis
+    if not tree_analysis.ollama_available():
+        raise HTTPException(503, "LLM service (Ollama) unavailable")
+    try:
+        metrics = tree_analysis.compute_tree_metrics(
+            ply_path, cache_path=os.path.join(task_dir, 'trees.json'))
+        text = tree_analysis.analyze_tree(metrics, tree_id, lang=lang)
+        return JSONResponse({'task_id': task_id, 'tree_id': tree_id,
+                             'analysis': text})
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {e}")
+
+
 @app.get("/tasks")
 def list_tasks():
     """List all tasks with their current status and progress."""
