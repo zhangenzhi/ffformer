@@ -38,9 +38,11 @@ sys.path.insert(0, PROJECT_ROOT)
 # Patch mmcv version BEFORE any mmlab imports (must be early)
 import mmcv_compat  # noqa: E402, F401
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import (FastAPI, UploadFile, File, HTTPException, BackgroundTasks,
+                     Request, Response, Cookie, Depends)
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 import numpy as np
 
@@ -63,6 +65,125 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Authentication ---
+from deploy import auth
+
+COOKIE_NAME = "ff_session"
+# Auth can be disabled (e.g. local dev) via AUTH_ENABLED=0.
+AUTH_ENABLED = os.environ.get('AUTH_ENABLED', '1') != '0'
+
+
+def current_user(ff_session: str = Cookie(default=None)):
+    """Dependency: require a valid session, return the username."""
+    if not AUTH_ENABLED:
+        return 'anonymous'
+    user = auth.verify_token(ff_session)
+    if not user:
+        raise HTTPException(401, "未登录或会话已过期")
+    return user
+
+
+def require_admin(user: str = Depends(current_user)):
+    if AUTH_ENABLED and auth.get_role(user) != 'admin':
+        raise HTTPException(403, "需要管理员权限")
+    return user
+
+
+class _Credentials(BaseModel):
+    username: str
+    password: str
+
+
+class _PasswordChange(BaseModel):
+    old_password: str
+    new_password: str
+
+
+def _set_session_cookie(resp: Response, username: str):
+    resp.set_cookie(COOKIE_NAME, auth.issue_token(username),
+                    max_age=auth.SESSION_MAX_AGE, httponly=True,
+                    samesite='lax', path='/')
+
+
+@app.post("/auth/register")
+def auth_register(creds: _Credentials, response: Response):
+    first_user = auth.user_count() == 0
+    ok, msg = auth.create_user(creds.username, creds.password)
+    if not ok:
+        raise HTTPException(400, msg)
+    _set_session_cookie(response, creds.username)
+    return {'username': creds.username, 'role': msg, 'first_user': first_user}
+
+
+@app.post("/auth/login")
+def auth_login(creds: _Credentials, response: Response):
+    if not auth.verify_password(creds.username, creds.password):
+        raise HTTPException(401, "用户名或密码错误")
+    _set_session_cookie(response, creds.username)
+    return {'username': creds.username, 'role': auth.get_role(creds.username)}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response):
+    response.delete_cookie(COOKIE_NAME, path='/')
+    return {'ok': True}
+
+
+@app.get("/auth/me")
+def auth_me(ff_session: str = Cookie(default=None)):
+    if not AUTH_ENABLED:
+        return {'username': 'anonymous', 'role': 'admin', 'auth_enabled': False}
+    user = auth.verify_token(ff_session)
+    if not user:
+        raise HTTPException(401, "未登录")
+    return {'username': user, 'role': auth.get_role(user),
+            'auth_enabled': True, 'has_users': auth.user_count() > 0}
+
+
+@app.get("/auth/status")
+def auth_status():
+    """Open endpoint: does the system need first-run setup?"""
+    return {'auth_enabled': AUTH_ENABLED, 'has_users': auth.user_count() > 0}
+
+
+@app.post("/auth/password")
+def auth_password(req: _PasswordChange, user: str = Depends(current_user)):
+    ok, msg = auth.change_password(user, req.old_password, req.new_password)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {'ok': True, 'message': msg}
+
+
+@app.get("/auth/users")
+def auth_users(user: str = Depends(require_admin)):
+    return auth.list_users()
+
+
+@app.delete("/auth/users/{username}")
+def auth_delete_user(username: str, user: str = Depends(require_admin)):
+    if username == user:
+        raise HTTPException(400, "不能删除自己")
+    ok, msg = auth.delete_user(username)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {'ok': True, 'message': msg}
+
+
+# Paths reachable without a session: the dashboard shell (renders the login
+# form), the k8s health probe, and the auth endpoints themselves.
+_OPEN_PATHS = {'/', '/health', '/favicon.ico'}
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    if AUTH_ENABLED:
+        path = request.url.path
+        if path not in _OPEN_PATHS and not path.startswith('/auth/'):
+            if not auth.verify_token(request.cookies.get(COOKIE_NAME)):
+                return JSONResponse({'detail': '未登录或会话已过期'}, status_code=401)
+    return await call_next(request)
+
 
 # --- Global state ---
 WORK_DIR = os.environ.get('WORK_DIR', os.path.join(PROJECT_ROOT, 'work_dirs'))
