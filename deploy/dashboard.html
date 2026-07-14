@@ -357,7 +357,7 @@ body.page-analyze .analysis-page { display:flex; }
 body.page-import .main { display:none; }
 body.page-import .import-page { display:flex; }
 
-/* Page 2 (分割) focuses on the running task + 3D result: import controls
+/* Page 2 (Segment) focuses on the running task + 3D result: import controls
    (upload zone, data/files browsers) belong to page 1 and are hidden here. */
 body.page-segment .drop-area,
 body.page-segment .upload-params,
@@ -503,20 +503,20 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 <div class="auth-overlay" id="authOverlay" style="display:none">
   <div class="auth-card">
     <div class="logo">Forest<span>Former3D</span></div>
-    <div class="sub" id="authSub">森林点云分割与分析平台</div>
+    <div class="sub" id="authSub">Forest Point-Cloud Segmentation & Analysis</div>
     <div class="auth-tabs" id="authTabs">
-      <button class="active" id="tabLogin" onclick="authTab('login')">登录</button>
-      <button id="tabRegister" onclick="authTab('register')">注册</button>
+      <button class="active" id="tabLogin" onclick="authTab('login')">Sign In</button>
+      <button id="tabRegister" onclick="authTab('register')">Sign Up</button>
     </div>
     <div class="auth-field">
-      <label>用户名</label>
+      <label>Username</label>
       <input type="text" id="authUser" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('authInputPw').focus()">
     </div>
     <div class="auth-field">
-      <label>密码</label>
+      <label>Password</label>
       <input type="password" id="authInputPw" autocomplete="current-password" onkeydown="if(event.key==='Enter')doAuth()">
     </div>
-    <button class="auth-btn" id="authSubmit" onclick="doAuth()">登录</button>
+    <button class="auth-btn" id="authSubmit" onclick="doAuth()">Sign In</button>
     <div class="auth-msg" id="authMsg"></div>
     <div class="auth-note" id="authNote"></div>
   </div>
@@ -526,10 +526,10 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 <div class="modal-overlay" id="pwModal" onclick="if(event.target===this)closeModal('pwModal')">
   <div class="modal-box">
     <button class="close-x" onclick="closeModal('pwModal')">&times;</button>
-    <h3>修改密码</h3>
-    <div class="auth-field"><label>当前密码</label><input type="password" id="pwOld"></div>
-    <div class="auth-field"><label>新密码(≥6位)</label><input type="password" id="pwNew"></div>
-    <button class="auth-btn" onclick="doChangePassword()">更新密码</button>
+    <h3>Change Password</h3>
+    <div class="auth-field"><label>Current password</label><input type="password" id="pwOld"></div>
+    <div class="auth-field"><label>New password (≥6 chars)</label><input type="password" id="pwNew"></div>
+    <button class="auth-btn" onclick="doChangePassword()">Update Password</button>
     <div class="auth-msg" id="pwMsg"></div>
   </div>
 </div>
@@ -538,19 +538,19 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 <div class="modal-overlay" id="usersModal" onclick="if(event.target===this)closeModal('usersModal')">
   <div class="modal-box">
     <button class="close-x" onclick="closeModal('usersModal')">&times;</button>
-    <h3>用户管理</h3>
+    <h3>User Management</h3>
     <div id="usersList"></div>
     <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
-      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">添加用户</div>
-      <div class="auth-field"><label>用户名</label><input type="text" id="newUserName"></div>
-      <div class="auth-field"><label>密码(≥6位)</label><input type="password" id="newUserPw"></div>
-      <div class="auth-field"><label>角色</label>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Add User</div>
+      <div class="auth-field"><label>Username</label><input type="text" id="newUserName"></div>
+      <div class="auth-field"><label>Password (≥6 chars)</label><input type="password" id="newUserPw"></div>
+      <div class="auth-field"><label>Role</label>
         <select id="newUserRole" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:9px 12px;font-size:14px">
-          <option value="user">普通用户</option>
-          <option value="admin">管理员</option>
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
         </select>
       </div>
-      <button class="auth-btn" onclick="doAddUser()">创建账户</button>
+      <button class="auth-btn" onclick="doAddUser()">Create Account</button>
       <div class="auth-msg" id="newUserMsg"></div>
     </div>
   </div>
@@ -568,12 +568,12 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <span><span id="acctName">—</span> <span class="rl" id="acctRole"></span></span>
     </button>
     <div class="acct-menu" id="acctMenu">
-      <div class="hdr">已登录为 <b id="acctNameFull">—</b></div>
+      <div class="hdr">Signed in as <b id="acctNameFull">—</b></div>
       <div class="sep"></div>
-      <div class="mi" onclick="openPasswordModal()">&#x1F511; 修改密码</div>
-      <div class="mi" id="miUsers" onclick="openUsersModal()" style="display:none">&#x1F465; 用户管理</div>
+      <div class="mi" onclick="openPasswordModal()">&#x1F511; Change Password</div>
+      <div class="mi" id="miUsers" onclick="openUsersModal()" style="display:none">&#x1F465; User Management</div>
       <div class="sep"></div>
-      <div class="mi danger" onclick="doLogout()">&#x21AA; 退出登录</div>
+      <div class="mi danger" onclick="doLogout()">&#x21AA; Sign Out</div>
     </div>
   </div>
 </header>
@@ -590,7 +590,7 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <div class="config-meta" id="modelMeta"></div>
     </div>
     <div class="sidebar-hint">
-      在 <b>&#x1F4E5; 数据导入</b> 页选择点云并「送去分割」。本页显示分割运行状态与 3D 结果。
+      Pick a point cloud on the <b>&#x1F4E5; Data Import</b> page and hit "Send to Segment". This page shows live segmentation progress and the 3D result.
     </div>
     <div class="upload-zone">
       <div class="drop-area" id="dropArea">
@@ -678,10 +678,10 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 
     <!-- Semantic color legend -->
     <div class="viewer-legend" id="viewerLegend">
-      <div class="vl-title">语义分类</div>
-      <div class="vl-item"><span class="vl-sw" style="background:rgb(139,119,101)"></span>地面 Ground</div>
-      <div class="vl-item"><span class="vl-sw" style="background:rgb(210,150,60)"></span>木质 Wood</div>
-      <div class="vl-item"><span class="vl-sw" style="background:rgb(34,180,34)"></span>叶片 Leaf</div>
+      <div class="vl-title">Semantic classes</div>
+      <div class="vl-item"><span class="vl-sw" style="background:rgb(139,119,101)"></span>Ground</div>
+      <div class="vl-item"><span class="vl-sw" style="background:rgb(210,150,60)"></span>Wood</div>
+      <div class="vl-item"><span class="vl-sw" style="background:rgb(34,180,34)"></span>Leaf</div>
     </div>
 
     <!-- Hardware spec panel -->
@@ -692,72 +692,72 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
   </div>
 </div>
 
-<!-- ==================== PAGE 1: 数据导入 (媒体库) ==================== -->
+<!-- ==================== PAGE 1: Data Import (Media Library) ==================== -->
 <div class="import-page">
   <div class="media-main">
     <div class="media-toolbar">
       <div class="media-drop" id="mediaDrop">
         <span class="ic">&#x1F4E5;</span>
-        <span class="txt"><b>拖入 LAS / LAZ / PLY 点云</b>或点击选择文件导入媒体库</span>
+        <span class="txt"><b>Drop LAS / LAZ / PLY point cloud</b>or click to select a file to import</span>
       </div>
       <input type="file" id="mediaFileInput" accept=".las,.laz,.ply" hidden>
-      <button class="btn-sm" onclick="refreshMediaLibrary()">刷新服务器数据</button>
+      <button class="btn-sm" onclick="refreshMediaLibrary()">Refresh server data</button>
       <span class="media-count" id="mediaCount">—</span>
     </div>
     <div class="media-grid" id="mediaGrid"></div>
   </div>
   <div class="media-inspector" id="mediaInspector">
-    <div class="mi-empty">选择一个数据集查看详情</div>
+    <div class="mi-empty">Select a dataset to view details</div>
   </div>
 </div>
 
-<!-- ==================== PAGE 3: 智能分析 ==================== -->
+<!-- ==================== PAGE 3: Analysis ==================== -->
 <div class="analysis-page">
   <div class="tree-panel">
     <div class="tp-head">
-      <h3>&#x1F333; 单体树木</h3>
+      <h3>&#x1F333; Individual Trees</h3>
       <span class="count" id="treeCount">—</span>
     </div>
     <div class="tree-table-wrap" id="treeTableWrap">
       <div class="files-empty" style="padding:20px;color:#8b949e;font-size:12px">
-        在「分割」页选择一个已完成的任务,再切到本页查看逐树指标。
+        Select a completed task on the Segment page, then return here for per-tree metrics.
       </div>
     </div>
   </div>
   <div class="analysis-main" id="analysisMain">
     <div class="amx-empty" id="analysisEmpty">
       <div class="big">&#x1F916;</div>
-      <p>选择一个已完成的分割任务开始 AI 分析</p>
+      <p>Select a completed segmentation task to start AI analysis</p>
     </div>
     <div class="scopes" id="scopes" style="display:none">
       <div class="scope">
-        <div class="sc-head"><h4>树高分布</h4><span class="sc-sub" id="histSub"></span></div>
+        <div class="sc-head"><h4>Height Distribution</h4><span class="sc-sub" id="histSub"></span></div>
         <svg id="histSvg" viewBox="0 0 440 170"></svg>
       </div>
       <div class="scope">
-        <div class="sc-head"><h4>叶木比 × 树高</h4><span class="sc-sub">点击散点做单株分析</span></div>
+        <div class="sc-head"><h4>Leaf/Wood Ratio × Height</h4><span class="sc-sub">click a point for per-tree analysis</span></div>
         <svg id="scatSvg" viewBox="0 0 440 170"></svg>
         <div class="scope-legend">
-          <span><i style="background:var(--orange)"></i>稀疏冠层(叶木比&lt;15)</span>
-          <span><i style="background:var(--green)"></i>正常</span>
-          <span><i style="background:var(--accent)"></i>密集(&gt;120)</span>
+          <span><i style="background:var(--orange)"></i>Sparse canopy (ratio &lt; 15)</span>
+          <span><i style="background:var(--green)"></i>Normal</span>
+          <span><i style="background:var(--accent)"></i>Dense (&gt; 120)</span>
         </div>
       </div>
     </div>
     <div class="llm-card scene-card" id="sceneCard" style="display:none">
       <div class="lc-head">
-        <h3>林分整体评估</h3>
+        <h3>Stand-level Assessment</h3>
         <span class="badge-ai">AI</span>
-        <button class="btn-sm" id="sceneBtn" onclick="analyzeScene()" style="margin-left:auto">生成分析</button>
+        <button class="btn-sm" id="sceneBtn" onclick="analyzeScene()" style="margin-left:auto">Generate</button>
       </div>
-      <div class="lc-body muted" id="sceneBody">点击「生成分析」调用 LLM 对整片林地作结构与健康评估。</div>
+      <div class="lc-body muted" id="sceneBody">Click "Generate" to run the LLM's structural and health assessment of the whole plot.</div>
     </div>
     <div class="llm-card tree-card" id="treeCard" style="display:none">
       <div class="lc-head">
-        <h3 id="treeCardTitle">单株健康分析</h3>
+        <h3 id="treeCardTitle">Tree Health Analysis</h3>
         <span class="badge-ai">AI</span>
       </div>
-      <div class="lc-body muted" id="treeBody">在左侧表格点选一棵树,查看其结构与健康的 AI 推断。</div>
+      <div class="lc-body muted" id="treeBody">Pick a tree in the table on the left for the AI's structural and health assessment.</div>
     </div>
   </div>
 </div>
@@ -765,13 +765,13 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 <!-- ==================== DaVinci-style bottom page bar ==================== -->
 <div class="pagebar">
   <button class="active" id="pageImport" onclick="switchPage('import')">
-    <span class="pico">&#x1F4E5;</span><span><span class="pnum">1 </span>数据导入</span>
+    <span class="pico">&#x1F4E5;</span><span><span class="pnum">1 </span>Data Import</span>
   </button>
   <button id="pageSegment" onclick="switchPage('segment')">
-    <span class="pico">&#x1F332;</span><span><span class="pnum">2 </span>分割</span>
+    <span class="pico">&#x1F332;</span><span><span class="pnum">2 </span>Segment</span>
   </button>
   <button id="pageAnalyze" onclick="switchPage('analyze')">
-    <span class="pico">&#x1F916;</span><span><span class="pnum">3 </span>智能分析</span>
+    <span class="pico">&#x1F916;</span><span><span class="pnum">3 </span>Analysis</span>
   </button>
 </div>
 
@@ -807,7 +807,7 @@ const UNASSIGNED = [80,80,80];
 // ==================== STATE ====================
 let selectedFile = null;
 let activeTaskId = null;
-let currentPage = 'segment';
+let currentPage = 'import';
 let treeMetrics = null;       // cached /result/{id}/trees for activeTaskId
 let treeMetricsTask = null;   // which task treeMetrics belongs to
 let selectedTreeId = null;
@@ -1943,12 +1943,12 @@ function updateHardwarePanel(data) {
     }
     html += '</div>';
   } else if (data.gpu_location === 'hpc') {
-    html += '<div class="hw-gpu">HPC GPU 集群</div>';
-    html += row('推理位置', 'NVIDIA H100 · PBS');
-    html += row('状态', data.model_loaded
-      ? '<span style="color:var(--orange)">运行中</span>'
-      : '<span style="color:var(--text2)">空闲</span>');
-    html += '<div class="hw-section" style="font-size:10px;color:var(--text2);padding-top:4px">任务运行时显示计算节点实时遥测</div>';
+    html += '<div class="hw-gpu">HPC GPU Cluster</div>';
+    html += row('Inference', 'NVIDIA H100 · PBS');
+    html += row('Status', data.model_loaded
+      ? '<span style="color:var(--orange)">Running</span>'
+      : '<span style="color:var(--text2)">Idle</span>');
+    html += '<div class="hw-section" style="font-size:10px;color:var(--text2);padding-top:4px">Live compute-node telemetry shown while a task runs</div>';
   } else {
     html += '<div class="hw-nogpu">No GPU</div>';
   }
@@ -1989,8 +1989,8 @@ function updateHardwareFromPoll(hw) {
   const onHpc = hw.node || hw.gpu_name || hw.job_id;
   let html = `<div class="hw-section-title" style="color:var(--orange)">${onHpc ? 'Live · HPC GPU' : 'Live · Inference Running'}</div>`;
   if (hw.gpu_name) html += `<div class="hw-gpu">${hw.gpu_name}</div>`;
-  if (hw.node) html += row('节点', hw.node);
-  if (hw.job_id) html += row('作业', hw.job_id);
+  if (hw.node) html += row('Node', hw.node);
+  if (hw.job_id) html += row('Job', hw.job_id);
 
   if (hw.gpu_util_pct != null) {
     html += utilBar('GPU', hw.gpu_util_pct);
@@ -2182,7 +2182,7 @@ async function refreshAnalysisPage() {
     document.getElementById('scopes').style.display = 'none';
     document.getElementById('treeCount').textContent = '—';
     document.getElementById('treeTableWrap').innerHTML =
-      '<div class="files-empty" style="padding:20px;color:#8b949e;font-size:12px">在「分割」页选择一个已完成的任务,再切到本页查看逐树指标。</div>';
+      '<div class="files-empty" style="padding:20px;color:#8b949e;font-size:12px">Select a completed task on the Segment page, then return here for per-tree metrics.</div>';
     return;
   }
   empty.style.display = 'none';
@@ -2194,20 +2194,20 @@ async function loadTreeTable(tid) {
   const wrap = document.getElementById('treeTableWrap');
   if (treeMetricsTask !== tid) {
     treeMetrics = null; selectedTreeId = null;
-    wrap.innerHTML = '<div style="padding:20px;color:#8b949e;font-size:12px"><span class="spin"></span> 计算逐树指标…</div>';
+    wrap.innerHTML = '<div style="padding:20px;color:#8b949e;font-size:12px"><span class="spin"></span> Computing per-tree metrics…</div>';
     // Reset LLM cards for the new task
     document.getElementById('sceneBody').className = 'lc-body muted';
-    document.getElementById('sceneBody').textContent = '点击「生成分析」调用 LLM 对整片林地作结构与健康评估。';
+    document.getElementById('sceneBody').textContent = 'Click "Generate" to run the LLM's structural and health assessment of the whole plot.';
     document.getElementById('treeBody').className = 'lc-body muted';
-    document.getElementById('treeBody').textContent = '在左侧表格点选一棵树,查看其结构与健康的 AI 推断。';
-    document.getElementById('treeCardTitle').textContent = '单株健康分析';
+    document.getElementById('treeBody').textContent = 'Pick a tree in the table on the left for the AI's structural and health assessment.';
+    document.getElementById('treeCardTitle').textContent = 'Tree Health Analysis';
     try {
       const resp = await fetch(`${API}/result/${tid}/trees`);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       treeMetrics = await resp.json();
       treeMetricsTask = tid;
     } catch (e) {
-      wrap.innerHTML = `<div style="padding:20px;color:#f85149;font-size:12px">指标加载失败: ${e.message}</div>`;
+      wrap.innerHTML = `<div style="padding:20px;color:#f85149;font-size:12px">Failed to load metrics: ${e.message}</div>`;
       return;
     }
   }
@@ -2253,7 +2253,7 @@ function renderHistogram() {
   const bins = new Array(nbins).fill(0);
   for (const h of heights) bins[Math.min(nbins - 1, Math.floor(h / binW))]++;
   const cmax = Math.max(...bins);
-  document.getElementById('histSub').textContent = `${heights.length} 棵 · 0–${hmax.toFixed(0)}m`;
+  document.getElementById('histSub').textContent = `${heights.length} trees · 0–${hmax.toFixed(0)}m`;
 
   const svg = document.getElementById('histSvg');
   svg.innerHTML = '';
@@ -2273,14 +2273,14 @@ function renderHistogram() {
     const x = PLOT.x0 + i * bw + 2;
     const bar = svgEl('rect', {class:'sc-bar', x, y:PLOT.y1 - bh, width:Math.max(1, bw - 4), height:bh, rx:3});
     const lo = (i*binW).toFixed(0), hi = ((i+1)*binW).toFixed(0);
-    bar.addEventListener('mousemove', e => showTip(e, `${lo}–${hi} m<br><b>${bins[i]}</b> 棵`));
+    bar.addEventListener('mousemove', e => showTip(e, `${lo}–${hi} m<br><b>${bins[i]}</b> trees`));
     bar.addEventListener('mouseleave', hideTip);
     svg.appendChild(bar);
   }
   // x tick labels (min/max)
   const t0 = svgEl('text', {class:'sc-tick', x:PLOT.x0, y:PLOT.y1+12}); t0.textContent = '0'; svg.appendChild(t0);
   const t1 = svgEl('text', {class:'sc-tick', x:PLOT.x1, y:PLOT.y1+12, 'text-anchor':'end'}); t1.textContent = hmax.toFixed(0)+'m'; svg.appendChild(t1);
-  const at = svgEl('text', {class:'sc-atitle', x:PLOT.x0, y:PLOT.y0-0, 'text-anchor':'start'}); at.textContent = '棵数'; svg.appendChild(at);
+  const at = svgEl('text', {class:'sc-atitle', x:PLOT.x0, y:PLOT.y0-0, 'text-anchor':'start'}); at.textContent = 'Count'; svg.appendChild(at);
 }
 
 function renderScatter() {
@@ -2303,13 +2303,13 @@ function renderScatter() {
     const cy = PLOT.y1 - (t.leaf_wood_ratio / ymax) * ph;
     const dot = svgEl('circle', {class:'sc-dot', cx, cy, r:4, fill:healthColor(t.leaf_wood_ratio),
       'fill-opacity':0.85, stroke:'var(--bg2)', 'stroke-width':1});
-    dot.addEventListener('mousemove', e => showTip(e, `#${t.id} · 高 ${t.height_m}m<br>叶木比 <b>${t.leaf_wood_ratio}</b> · 置信 ${t.mean_score}`));
+    dot.addEventListener('mousemove', e => showTip(e, `#${t.id} · H ${t.height_m}m<br>Leaf/Wood <b>${t.leaf_wood_ratio}</b> · Conf ${t.mean_score}`));
     dot.addEventListener('mouseleave', hideTip);
     dot.addEventListener('click', () => { hideTip(); analyzeTree(t.id); });
     svg.appendChild(dot);
   }
   const tx = svgEl('text', {class:'sc-tick', x:PLOT.x1, y:PLOT.y1+12, 'text-anchor':'end'}); tx.textContent = xmax.toFixed(0)+'m'; svg.appendChild(tx);
-  const at = svgEl('text', {class:'sc-atitle', x:PLOT.x0, y:PLOT.y0-0}); at.textContent = '叶木比'; svg.appendChild(at);
+  const at = svgEl('text', {class:'sc-atitle', x:PLOT.x0, y:PLOT.y0-0}); at.textContent = 'Leaf/Wood'; svg.appendChild(at);
 }
 
 function lwColor(r) {
@@ -2321,9 +2321,9 @@ function lwColor(r) {
 
 function renderTreeTable() {
   const m = treeMetrics;
-  document.getElementById('treeCount').textContent = `${m.n_trees} 棵 · 地面 ${m.ground_z}m`;
+  document.getElementById('treeCount').textContent = `${m.n_trees} trees · ground ${m.ground_z}m`;
   let html = '<table class="tree-table"><thead><tr>' +
-    '<th>#</th><th>高(m)</th><th>冠幅(m)</th><th>叶木比</th><th>点数</th><th>置信</th>' +
+    '<th>#</th><th>Height(m)</th><th>Crown(m)</th><th>Leaf/Wood</th><th>Points</th><th>Conf</th>' +
     '</tr></thead><tbody>';
   for (const t of m.trees) {
     const sel = t.id === selectedTreeId ? 'sel' : '';
@@ -2343,16 +2343,16 @@ async function analyzeScene() {
   const body = document.getElementById('sceneBody');
   btn.disabled = true;
   body.className = 'lc-body muted';
-  body.innerHTML = '<span class="spin"></span> LLM 分析中(CPU 推理,约需 1–3 分钟)…';
+  body.innerHTML = '<span class="spin"></span> LLM Analyzing (CPU inference, ~1–3 min)…';
   try {
-    const resp = await fetch(`${API}/analyze/${activeTaskId}?lang=zh`, {method: 'POST'});
+    const resp = await fetch(`${API}/analyze/${activeTaskId}?lang=en`, {method: 'POST'});
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
     body.className = 'lc-body';
     body.textContent = data.analysis;
   } catch (e) {
     body.className = 'lc-body';
-    body.innerHTML = `<span style="color:#f85149">分析失败: ${e.message}</span>`;
+    body.innerHTML = `<span style="color:#f85149">Analysis failed: ${e.message}</span>`;
   } finally {
     btn.disabled = false;
   }
@@ -2363,18 +2363,18 @@ async function analyzeTree(treeId) {
   selectedTreeId = treeId;
   renderTreeTable();
   const body = document.getElementById('treeBody');
-  document.getElementById('treeCardTitle').textContent = `单株健康分析 · #${treeId}`;
+  document.getElementById('treeCardTitle').textContent = `Tree Health Analysis · #${treeId}`;
   body.className = 'lc-body muted';
-  body.innerHTML = '<span class="spin"></span> LLM 分析中(CPU 推理,约需 1–3 分钟)…';
+  body.innerHTML = '<span class="spin"></span> LLM Analyzing (CPU inference, ~1–3 min)…';
   try {
-    const resp = await fetch(`${API}/analyze/${activeTaskId}/tree/${treeId}?lang=zh`, {method: 'POST'});
+    const resp = await fetch(`${API}/analyze/${activeTaskId}/tree/${treeId}?lang=en`, {method: 'POST'});
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
     body.className = 'lc-body';
     body.textContent = data.analysis;
   } catch (e) {
     body.className = 'lc-body';
-    body.innerHTML = `<span style="color:#f85149">分析失败: ${e.message}</span>`;
+    body.innerHTML = `<span style="color:#f85149">Analysis failed: ${e.message}</span>`;
   }
 }
 
@@ -2420,7 +2420,7 @@ async function refreshMediaLibrary() {
   const localItems = mediaItems.filter(m => m.source === 'local');
   mediaItems = [...localItems];
 
-  // Completed tasks as "已处理" items
+  // Completed tasks as "Processed" items
   for (const [tid, t] of Object.entries(taskData)) {
     if (t.status === 'completed') {
       const st = t.stats || {};
@@ -2454,9 +2454,9 @@ async function refreshMediaLibrary() {
 
 function renderMediaGrid() {
   const grid = document.getElementById('mediaGrid');
-  document.getElementById('mediaCount').textContent = `${mediaItems.length} 个数据集`;
+  document.getElementById('mediaCount').textContent = `${mediaItems.length} datasets`;
   if (!mediaItems.length) {
-    grid.innerHTML = '<div class="files-empty" style="color:#8b949e;font-size:12px;grid-column:1/-1;padding:20px">暂无数据。拖入点云文件,或点「刷新服务器数据」。</div>';
+    grid.innerHTML = '<div class="files-empty" style="color:#8b949e;font-size:12px;grid-column:1/-1;padding:20px">No data yet. Drop a point-cloud file, or click "Refresh server data".</div>';
     return;
   }
   let html = '';
@@ -2464,9 +2464,9 @@ function renderMediaGrid() {
     const fmt = (m.format||'').toLowerCase();
     const badgeCls = ['las','laz','ply'].includes(fmt) ? fmt : 'las';
     const color = fmt==='laz'?'var(--green)':fmt==='ply'?'var(--orange)':'var(--accent)';
-    const doneBadge = m.source==='task' ? '<span class="media-badge done">&#x2713; 已处理</span>' : '';
+    const doneBadge = m.source==='task' ? '<span class="media-badge done">&#x2713; Processed</span>' : '';
     const pc = m.point_count!=null ? m.point_count.toLocaleString() : '—';
-    const ext = (m.extent_x&&m.extent_y) ? `${m.extent_x}&#xD7;${m.extent_y}m` : (m.n_trees!=null?`${m.n_trees} 棵树`:'—');
+    const ext = (m.extent_x&&m.extent_y) ? `${m.extent_x}&#xD7;${m.extent_y}m` : (m.n_trees!=null?`${m.n_trees} trees`:'—');
     const sz = m.size!=null ? formatFileSize(m.size) : (m.file?formatFileSize(m.file.size):'—');
     html += `<div class="media-card ${m.id===selectedMediaId?'sel':''}" onclick="selectMediaItem('${m.id.replace(/'/g,"\\'")}')">
       <div class="media-thumb">
@@ -2475,9 +2475,9 @@ function renderMediaGrid() {
       </div>
       <div class="media-meta">
         <div class="mname" title="${m.name}">${m.name}</div>
-        <div class="mrow"><span>点数</span><span class="v">${pc}</span></div>
-        <div class="mrow"><span>${m.source==='task'?'结果':'范围'}</span><span class="v">${ext}</span></div>
-        <div class="mrow"><span>大小</span><span class="v">${sz}</span></div>
+        <div class="mrow"><span>Points</span><span class="v">${pc}</span></div>
+        <div class="mrow"><span>${m.source==='task'?'Result':'Extent'}</span><span class="v">${ext}</span></div>
+        <div class="mrow"><span>Size</span><span class="v">${sz}</span></div>
       </div>
     </div>`;
   }
@@ -2493,27 +2493,27 @@ function selectMediaItem(id) {
 function renderMediaInspector() {
   const insp = document.getElementById('mediaInspector');
   const m = mediaItems.find(x => x.id === selectedMediaId);
-  if (!m) { insp.innerHTML = '<div class="mi-empty">选择一个数据集查看详情</div>'; return; }
+  if (!m) { insp.innerHTML = '<div class="mi-empty">Select a dataset to view details</div>'; return; }
   const fmt = (m.format||'').toLowerCase();
   const color = fmt==='laz'?'var(--green)':fmt==='ply'?'var(--orange)':'var(--accent)';
   const pc = m.point_count!=null ? m.point_count.toLocaleString() : '—';
   const sz = m.size!=null ? formatFileSize(m.size) : (m.file?formatFileSize(m.file.size):'—');
-  let specs = `<div class="mi-spec"><span class="k">格式</span><span class="v">${(fmt||'?').toUpperCase()}</span></div>
-    <div class="mi-spec"><span class="k">点数</span><span class="v">${pc}</span></div>
-    <div class="mi-spec"><span class="k">文件大小</span><span class="v">${sz}</span></div>`;
-  if (m.extent_x) specs += `<div class="mi-spec"><span class="k">平面范围</span><span class="v">${m.extent_x}&#xD7;${m.extent_y} m</span></div>
-    <div class="mi-spec"><span class="k">高差</span><span class="v">${m.extent_z} m</span></div>`;
-  if (m.version) specs += `<div class="mi-spec"><span class="k">LAS 版本</span><span class="v">${m.version}</span></div>`;
-  if (m.n_trees!=null) specs += `<div class="mi-spec"><span class="k">检测树木</span><span class="v">${m.n_trees} 棵</span></div>`;
+  let specs = `<div class="mi-spec"><span class="k">Format</span><span class="v">${(fmt||'?').toUpperCase()}</span></div>
+    <div class="mi-spec"><span class="k">Points</span><span class="v">${pc}</span></div>
+    <div class="mi-spec"><span class="k">File size</span><span class="v">${sz}</span></div>`;
+  if (m.extent_x) specs += `<div class="mi-spec"><span class="k">Extent (XY)</span><span class="v">${m.extent_x}&#xD7;${m.extent_y} m</span></div>
+    <div class="mi-spec"><span class="k">Height range</span><span class="v">${m.extent_z} m</span></div>`;
+  if (m.version) specs += `<div class="mi-spec"><span class="k">LAS version</span><span class="v">${m.version}</span></div>`;
+  if (m.n_trees!=null) specs += `<div class="mi-spec"><span class="k">Trees detected</span><span class="v">${m.n_trees} trees</span></div>`;
 
   let action;
   if (m.source === 'task') {
-    action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">查看结果 &amp; 分析</button>`;
+    action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">View Result &amp; Analysis</button>`;
   } else {
-    action = `<button class="btn btn-primary" onclick="sendToSegment('${m.id.replace(/'/g,"\\'")}')">&#x1F332; 送去分割</button>`;
+    action = `<button class="btn btn-primary" onclick="sendToSegment('${m.id.replace(/'/g,"\\'")}')">&#x1F332; Send to Segment</button>`;
   }
   insp.innerHTML = `<h3>${m.name}</h3>
-    <div class="mi-sub">${m.source==='local'?'本地文件(待上传)':m.source==='task'?'已完成任务':'服务器数据'}</div>
+    <div class="mi-sub">${m.source==='local'?'Local file (pending upload)':m.source==='task'?'Completed task':'Server data'}</div>
     <div class="mi-thumb">${footprintSvg(m.extent_x, m.extent_y, color)}</div>
     <div class="mi-specs">${specs}</div>${action}`;
 }
@@ -2572,7 +2572,7 @@ function authTab(mode) {
   authMode = mode;
   document.getElementById('tabLogin').classList.toggle('active', mode==='login');
   document.getElementById('tabRegister').classList.toggle('active', mode==='register');
-  document.getElementById('authSubmit').textContent = mode==='login' ? '登录' : '注册';
+  document.getElementById('authSubmit').textContent = mode==='login' ? 'Sign In' : 'Sign Up';
   document.getElementById('authInputPw').setAttribute('autocomplete', mode==='login'?'current-password':'new-password');
   document.getElementById('authMsg').textContent = '';
 }
@@ -2582,7 +2582,7 @@ async function doAuth() {
   const password = document.getElementById('authInputPw').value;
   const msg = document.getElementById('authMsg');
   const btn = document.getElementById('authSubmit');
-  if (!username || !password) { msg.className='auth-msg err'; msg.textContent='请输入用户名和密码'; return; }
+  if (!username || !password) { msg.className='auth-msg err'; msg.textContent='Please enter a username and password'; return; }
   btn.disabled = true;
   try {
     const resp = await fetch(`${API}/auth/${authMode}`, {
@@ -2590,8 +2590,8 @@ async function doAuth() {
       body: JSON.stringify({username, password})
     });
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '失败');
-    if (data.first_user) { msg.className='auth-msg ok'; msg.textContent='已创建管理员账户'; }
+    if (!resp.ok) throw new Error(data.detail || 'Failed');
+    if (data.first_user) { msg.className='auth-msg ok'; msg.textContent='Admin account created'; }
     onAuthSuccess({username: data.username, role: data.role});
   } catch(e) {
     msg.className='auth-msg err'; msg.textContent = e.message;
@@ -2605,16 +2605,16 @@ async function checkAuth() {
     // Configure the login form for first-run (register) vs normal (login)
     if (!st.has_users) {
       authTab('register');
-      document.getElementById('authNote').textContent = '首次使用:创建的第一个账户将成为管理员。';
+      document.getElementById('authNote').textContent = 'First run: the first account created becomes the administrator.';
       document.getElementById('tabLogin').style.display='none';
       document.getElementById('tabRegister').style.display='none';
-      document.getElementById('authSub').textContent = '首次设置 · 创建管理员账户';
+      document.getElementById('authSub').textContent = 'First-time setup · Create admin account';
     } else if (!st.open_registration) {
       // Self-registration closed: login only.
       authTab('login');
       document.getElementById('tabRegister').style.display='none';
       document.getElementById('authTabs').style.display='none';
-      document.getElementById('authNote').textContent = '如需账户请联系管理员。';
+      document.getElementById('authNote').textContent = 'Contact an administrator for an account.';
     }
     const me = await fetch(`${API}/auth/me`);
     if (me.ok) {
@@ -2668,8 +2668,8 @@ async function doChangePassword() {
                             new_password:document.getElementById('pwNew').value})
     });
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail||'失败');
-    msg.className='auth-msg ok'; msg.textContent='密码已更新';
+    if (!resp.ok) throw new Error(data.detail||'Failed');
+    msg.className='auth-msg ok'; msg.textContent='Password updated';
     setTimeout(()=>closeModal('pwModal'), 1200);
   } catch(e) { msg.className='auth-msg err'; msg.textContent=e.message; }
 }
@@ -2685,15 +2685,15 @@ async function renderUsers() {
     list.innerHTML = users.map(u=>`<div class="user-row">
       <span class="u-name">${u.username}</span>
       <span class="u-role ${u.role}">${u.role}</span>
-      ${u.username!==currentUser.username?`<button class="u-del" onclick="deleteUser('${u.username}')">&#x1F5D1;</button>`:'<span class="u-del" style="opacity:0.3">你</span>'}
+      ${u.username!==currentUser.username?`<button class="u-del" onclick="deleteUser('${u.username}')">&#x1F5D1;</button>`:'<span class="u-del" style="opacity:0.3">you</span>'}
     </div>`).join('');
-  } catch(e) { list.innerHTML=`<div style="color:var(--red);font-size:12px">加载失败: ${e.message}</div>`; }
+  } catch(e) { list.innerHTML=`<div style="color:var(--red);font-size:12px">Load failed: ${e.message}</div>`; }
 }
 async function deleteUser(name) {
-  if (!confirm(`删除用户 ${name}?`)) return;
+  if (!confirm(`Delete user ${name}?`)) return;
   const resp = await fetch(`${API}/auth/users/${encodeURIComponent(name)}`, {method:'DELETE'});
   if (resp.ok) renderUsers();
-  else { const d=await resp.json(); alert(d.detail||'删除失败'); }
+  else { const d=await resp.json(); alert(d.detail||'Delete failed'); }
 }
 async function doAddUser() {
   const msg = document.getElementById('newUserMsg');
@@ -2705,19 +2705,20 @@ async function doAddUser() {
                             role:document.getElementById('newUserRole').value})
     });
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail||'失败');
-    msg.className='auth-msg ok'; msg.textContent=`已创建 ${data.username}`;
+    if (!resp.ok) throw new Error(data.detail||'Failed');
+    msg.className='auth-msg ok'; msg.textContent=`Created ${data.username}`;
     document.getElementById('newUserName').value=''; document.getElementById('newUserPw').value='';
     renderUsers();
   } catch(e) { msg.className='auth-msg err'; msg.textContent=e.message; }
 }
 
 // ==================== INIT ====================
-document.body.classList.add('page-segment');
+document.body.classList.add('page-import');
 initViewer();
 checkAuth();
 
 function initApp() {
+switchPage('import');  // land on the Data Import media library
 checkHealth();
 loadModels();
 setInterval(checkHealth, 15000);

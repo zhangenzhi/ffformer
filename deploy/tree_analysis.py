@@ -125,7 +125,7 @@ def _ollama_chat(system, user, temperature=0.3, timeout=300):
     return data['message']['content']
 
 
-def analyze_tree(metrics, tree_id, lang='zh'):
+def analyze_tree(metrics, tree_id, lang='en'):
     """LLM health assessment for one tree."""
     tree = next((t for t in metrics['trees'] if t['id'] == tree_id), None)
     if tree is None:
@@ -138,25 +138,28 @@ def analyze_tree(metrics, tree_id, lang='zh'):
         "Be concrete, note uncertainty, and ground every claim in the given "
         "metrics. Point clouds cannot show disease directly, so frame health "
         "as structural indicators (crown density, leaf/wood balance, form). "
-        + ("请用简体中文回答。" if lang == 'zh' else "Answer in English.")
+        + ("Reply in Simplified Chinese." if lang == 'zh' else "Answer in English.")
     )
     user = (
-        "单株树木的点云分割指标如下(单位:米):\n"
-        f"{json.dumps(tree, ensure_ascii=False, indent=2)}\n\n"
-        "语义点数说明:wood_points=木质(树干/枝)点数, leaf_points=叶片点数, "
-        "leaf_wood_ratio=叶木比, crown_ratio=冠幅/树高。\n\n"
-        "请给出:1) 树木结构概述(高度、冠形);2) 健康状况的结构性推断"
-        "(基于叶木比、冠层密度、分割置信度 mean_score);3) 需要实地复核的疑点。"
-        "控制在 150 字以内。"
+        "Per-tree segmentation metrics (metres):\n"
+        f"{json.dumps(tree, indent=2)}\n\n"
+        "Field notes: wood_points = woody (trunk/branch) points, "
+        "leaf_points = foliage points, leaf_wood_ratio = foliage/wood, "
+        "crown_ratio = crown width / height, mean_score = segmentation "
+        "confidence.\n\n"
+        "Give: 1) a structural summary (height, crown form); 2) a structural "
+        "inference of health (from leaf/wood ratio, canopy density, and "
+        "confidence); 3) points that warrant field verification. "
+        "Keep it under 120 words."
     )
     return _ollama_chat(system, user)
 
 
-def analyze_scene(metrics, stats=None, lang='zh'):
+def analyze_scene(metrics, stats=None, lang='en'):
     """LLM summary for the whole scene."""
     trees = metrics['trees']
     if not trees:
-        return "未检测到树木实例,无法分析。"
+        return "No tree instances detected; nothing to analyze."
     heights = [t['height_m'] for t in trees]
     lw = [t['leaf_wood_ratio'] for t in trees if t['leaf_wood_ratio'] is not None]
     summary = {
@@ -175,14 +178,15 @@ def analyze_scene(metrics, stats=None, lang='zh'):
         "airborne LiDAR. Give a concise stand-level assessment: size structure, "
         "canopy characteristics, and which individual trees warrant closer "
         "inspection. Ground claims in the metrics. "
-        + ("请用简体中文回答。" if lang == 'zh' else "Answer in English.")
+        + ("Reply in Simplified Chinese." if lang == 'zh' else "Answer in English.")
     )
     user = (
-        "整片林地的分割统计如下:\n"
-        f"{json.dumps(summary, ensure_ascii=False, indent=2)}\n\n"
-        "请给出:1) 林分整体结构(树高分布、密度);2) 冠层与健康的总体印象"
-        "(基于平均叶木比);3) 建议优先实地复核的单株(按结构异常)。"
-        "控制在 200 字以内。"
+        "Stand-level segmentation statistics:\n"
+        f"{json.dumps(summary, indent=2)}\n\n"
+        "Give: 1) overall stand structure (height distribution, density); "
+        "2) a general impression of canopy and health (from the mean leaf/wood "
+        "ratio); 3) individual trees to prioritise for field verification "
+        "(by structural anomaly). Keep it under 160 words."
     )
     return _ollama_chat(system, user)
 
