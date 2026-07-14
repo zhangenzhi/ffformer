@@ -72,6 +72,9 @@ from deploy import auth
 COOKIE_NAME = "ff_session"
 # Auth can be disabled (e.g. local dev) via AUTH_ENABLED=0.
 AUTH_ENABLED = os.environ.get('AUTH_ENABLED', '1') != '0'
+# Self-registration is closed by default; admins create accounts. The very
+# first account (bootstrap admin) can always self-register.
+OPEN_REGISTRATION = os.environ.get('AUTH_OPEN_REGISTRATION', '0') != '0'
 
 
 def current_user(ff_session: str = Cookie(default=None)):
@@ -109,11 +112,29 @@ def _set_session_cookie(resp: Response, username: str):
 @app.post("/auth/register")
 def auth_register(creds: _Credentials, response: Response):
     first_user = auth.user_count() == 0
+    if not first_user and not OPEN_REGISTRATION:
+        raise HTTPException(403, "自助注册已关闭,请联系管理员创建账户")
     ok, msg = auth.create_user(creds.username, creds.password)
     if not ok:
         raise HTTPException(400, msg)
     _set_session_cookie(response, creds.username)
     return {'username': creds.username, 'role': msg, 'first_user': first_user}
+
+
+class _NewUser(BaseModel):
+    username: str
+    password: str
+    role: str = 'user'
+
+
+@app.post("/auth/users")
+def auth_create_user(req: _NewUser, user: str = Depends(require_admin)):
+    """Admin-only account creation (used when self-registration is closed)."""
+    role = 'admin' if req.role == 'admin' else 'user'
+    ok, msg = auth.create_user(req.username, req.password, role=role)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {'ok': True, 'username': req.username, 'role': role}
 
 
 @app.post("/auth/login")
@@ -144,7 +165,8 @@ def auth_me(ff_session: str = Cookie(default=None)):
 @app.get("/auth/status")
 def auth_status():
     """Open endpoint: does the system need first-run setup?"""
-    return {'auth_enabled': AUTH_ENABLED, 'has_users': auth.user_count() > 0}
+    return {'auth_enabled': AUTH_ENABLED, 'has_users': auth.user_count() > 0,
+            'open_registration': OPEN_REGISTRATION}
 
 
 @app.post("/auth/password")

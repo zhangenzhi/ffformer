@@ -35,6 +35,8 @@ spec:
               value: /app
             - name: INFERENCE_BACKEND
               value: hpc
+            - name: AUTH_OPEN_REGISTRATION
+              value: "0"
             - name: HPC_HOST
               value: 172.31.20.1
             - name: HPC_USER

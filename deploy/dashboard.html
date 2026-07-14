@@ -540,6 +540,19 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
     <button class="close-x" onclick="closeModal('usersModal')">&times;</button>
     <h3>用户管理</h3>
     <div id="usersList"></div>
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">添加用户</div>
+      <div class="auth-field"><label>用户名</label><input type="text" id="newUserName"></div>
+      <div class="auth-field"><label>密码(≥6位)</label><input type="password" id="newUserPw"></div>
+      <div class="auth-field"><label>角色</label>
+        <select id="newUserRole" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:9px 12px;font-size:14px">
+          <option value="user">普通用户</option>
+          <option value="admin">管理员</option>
+        </select>
+      </div>
+      <button class="auth-btn" onclick="doAddUser()">创建账户</button>
+      <div class="auth-msg" id="newUserMsg"></div>
+    </div>
   </div>
 </div>
 
@@ -2596,6 +2609,12 @@ async function checkAuth() {
       document.getElementById('tabLogin').style.display='none';
       document.getElementById('tabRegister').style.display='none';
       document.getElementById('authSub').textContent = '首次设置 · 创建管理员账户';
+    } else if (!st.open_registration) {
+      // Self-registration closed: login only.
+      authTab('login');
+      document.getElementById('tabRegister').style.display='none';
+      document.getElementById('authTabs').style.display='none';
+      document.getElementById('authNote').textContent = '如需账户请联系管理员。';
     }
     const me = await fetch(`${API}/auth/me`);
     if (me.ok) {
@@ -2675,6 +2694,22 @@ async function deleteUser(name) {
   const resp = await fetch(`${API}/auth/users/${encodeURIComponent(name)}`, {method:'DELETE'});
   if (resp.ok) renderUsers();
   else { const d=await resp.json(); alert(d.detail||'删除失败'); }
+}
+async function doAddUser() {
+  const msg = document.getElementById('newUserMsg');
+  try {
+    const resp = await fetch(`${API}/auth/users`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username:document.getElementById('newUserName').value.trim(),
+                            password:document.getElementById('newUserPw').value,
+                            role:document.getElementById('newUserRole').value})
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail||'失败');
+    msg.className='auth-msg ok'; msg.textContent=`已创建 ${data.username}`;
+    document.getElementById('newUserName').value=''; document.getElementById('newUserPw').value='';
+    renderUsers();
+  } catch(e) { msg.className='auth-msg err'; msg.textContent=e.message; }
 }
 
 // ==================== INIT ====================
