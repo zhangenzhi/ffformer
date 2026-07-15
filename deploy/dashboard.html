@@ -750,14 +750,14 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
         <span class="badge-ai">AI</span>
         <button class="btn-sm" id="sceneBtn" onclick="analyzeScene()" style="margin-left:auto">Generate</button>
       </div>
-      <div class="lc-body muted" id="sceneBody">Click "Generate" to run the LLM's structural and health assessment of the whole plot.</div>
+      <div class="lc-body muted" id="sceneBody">Click "Generate" to run an LLM structural and health assessment of the whole plot.</div>
     </div>
     <div class="llm-card tree-card" id="treeCard" style="display:none">
       <div class="lc-head">
         <h3 id="treeCardTitle">Tree Health Analysis</h3>
         <span class="badge-ai">AI</span>
       </div>
-      <div class="lc-body muted" id="treeBody">Pick a tree in the table on the left for the AI's structural and health assessment.</div>
+      <div class="lc-body muted" id="treeBody">Pick a tree in the table on the left for an AI structural and health assessment.</div>
     </div>
   </div>
 </div>
@@ -2197,9 +2197,9 @@ async function loadTreeTable(tid) {
     wrap.innerHTML = '<div style="padding:20px;color:#8b949e;font-size:12px"><span class="spin"></span> Computing per-tree metrics…</div>';
     // Reset LLM cards for the new task
     document.getElementById('sceneBody').className = 'lc-body muted';
-    document.getElementById('sceneBody').textContent = 'Click "Generate" to run the LLM's structural and health assessment of the whole plot.';
+    document.getElementById('sceneBody').textContent = 'Click "Generate" to run an LLM structural and health assessment of the whole plot.';
     document.getElementById('treeBody').className = 'lc-body muted';
-    document.getElementById('treeBody').textContent = 'Pick a tree in the table on the left for the AI's structural and health assessment.';
+    document.getElementById('treeBody').textContent = 'Pick a tree in the table on the left for an AI structural and health assessment.';
     document.getElementById('treeCardTitle').textContent = 'Tree Health Analysis';
     try {
       const resp = await fetch(`${API}/result/${tid}/trees`);
