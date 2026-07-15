@@ -278,6 +278,10 @@ def get_engine():
 # --- Task tracking (shared across processes via Manager) ---
 _manager = multiprocessing.Manager()
 tasks = _manager.dict()
+# Imported datasets (staged to the pod + HPC ahead of segmentation)
+datasets = _manager.dict()
+IMPORT_DIR = os.environ.get('IMPORT_DIR', os.path.join(RESULTS_DIR, '_imports'))
+os.makedirs(IMPORT_DIR, exist_ok=True)
 
 
 PROGRESS_STEPS = [
@@ -775,6 +779,145 @@ def health():
             "size_mb": round(os.path.getsize(ckpt) / 1e6, 1),
         }
     return info
+
+
+# ── Import → stage to HPC → segment (the two-step flow) ────────────────────
+
+@app.post("/import")
+async def import_dataset(file: UploadFile = File(...)):
+    """Import a point cloud: save on the pod and (HPC backend) push it to the
+    HPC in the background so segmentation can start instantly later."""
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in ('.las', '.laz', '.ply'):
+        raise HTTPException(400, f"Unsupported format: {suffix}. Use .las, .laz, or .ply")
+
+    ds_id = str(uuid.uuid4())[:8]
+    ds_dir = os.path.join(IMPORT_DIR, ds_id)
+    os.makedirs(ds_dir, exist_ok=True)
+    input_path = os.path.join(ds_dir, f'input{suffix}')
+
+    await file.seek(0)
+    with open(input_path, 'wb') as f:
+        while True:
+            chunk = await file.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+    if os.path.getsize(input_path) == 0:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise HTTPException(400, "Uploaded file is empty")
+
+    datasets[ds_id] = {
+        'id': ds_id, 'filename': file.filename, 'format': suffix.lstrip('.'),
+        'size': os.path.getsize(input_path), 'input_path': input_path,
+        'hpc_stage': 'pending', 'hpc_progress': 0, 'hpc_ready': False,
+        'created': time.time(), 'updated': time.time(),
+    }
+
+    # Push to HPC in the background (HPC backend only; local backend keeps the
+    # pod copy and segments from it directly).
+    if INFERENCE_BACKEND == 'hpc':
+        _ensure_paramiko()
+        from deploy.hpc_backend import stage_to_hpc
+        proc = multiprocessing.Process(
+            target=stage_to_hpc, args=(datasets, ds_id, input_path, suffix),
+            daemon=True)
+        proc.start()
+    else:
+        d = dict(datasets[ds_id])
+        d.update(hpc_stage='ready', hpc_ready=True, hpc_progress=100,
+                 hpc_suffix=suffix)
+        datasets[ds_id] = d
+
+    return JSONResponse({'dataset_id': ds_id, 'hpc_stage': datasets[ds_id]['hpc_stage']})
+
+
+@app.get("/import/{ds_id}/status")
+def import_status(ds_id: str):
+    if ds_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    d = dict(datasets[ds_id])
+    d.pop('input_path', None)
+    return JSONResponse(d)
+
+
+@app.get("/datasets")
+def list_datasets():
+    out = []
+    for d in datasets.values():
+        d = dict(d)
+        d.pop('input_path', None)
+        out.append(d)
+    out.sort(key=lambda x: x.get('created', 0), reverse=True)
+    return JSONResponse(out)
+
+
+@app.delete("/dataset/{ds_id}")
+def delete_dataset(ds_id: str):
+    if ds_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    shutil.rmtree(os.path.join(IMPORT_DIR, ds_id), ignore_errors=True)
+    del datasets[ds_id]
+    return JSONResponse({'status': 'deleted', 'dataset_id': ds_id})
+
+
+class _SegmentRequest(BaseModel):
+    tile_size: float = 100
+    overlap: float = 10
+    model: str = None
+
+
+@app.post("/segment/{ds_id}")
+def segment_dataset(ds_id: str, req: _SegmentRequest):
+    """Start segmentation on an already-imported dataset (data pre-staged on
+    the HPC, so this skips the upload and qsubs immediately)."""
+    if ds_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    d = dict(datasets[ds_id])
+
+    if req.model:
+        if not os.path.isfile(req.model):
+            raise HTTPException(404, f"Checkpoint not found: {req.model}")
+        os.environ['CHECKPOINT_PATH'] = req.model
+
+    task_id = str(uuid.uuid4())[:8]
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    tasks[task_id] = {
+        'status': 'processing', 'step': 'queued', 'step_label': 'Queued on HPC',
+        'progress': 5, 'filename': d.get('filename', ds_id),
+        'dataset_id': ds_id, 'created': time.time(), 'updated': time.time(),
+    }
+
+    if INFERENCE_BACKEND == 'hpc':
+        if not d.get('hpc_ready'):
+            del tasks[task_id]
+            shutil.rmtree(task_dir, ignore_errors=True)
+            raise HTTPException(409, f"Dataset still staging to HPC "
+                                     f"({d.get('hpc_stage')})")
+        _ensure_paramiko()
+        from deploy.hpc_backend import run_hpc_inference_prestaged
+        proc = multiprocessing.Process(
+            target=run_hpc_inference_prestaged,
+            args=(tasks, task_id, ds_id, d.get('hpc_suffix', '.laz'),
+                  req.tile_size, req.overlap),
+            daemon=True)
+    else:
+        # Local backend: segment from the pod copy.
+        suffix = '.' + d.get('format', 'las')
+        input_link = os.path.join(task_dir, f'input{suffix}')
+        try:
+            os.symlink(d['input_path'], input_link)
+        except (OSError, KeyError):
+            shutil.copy2(d['input_path'], input_link)
+        proc = multiprocessing.Process(
+            target=_run_inference_background,
+            args=(tasks, task_id, input_link, suffix, req.tile_size, req.overlap),
+            daemon=True)
+    proc.start()
+
+    return JSONResponse({'task_id': task_id, 'dataset_id': ds_id,
+                         'status': 'processing', 'status_url': f'/task/{task_id}/status'})
 
 
 @app.post("/predict")

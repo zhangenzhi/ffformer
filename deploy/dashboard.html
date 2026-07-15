@@ -368,6 +368,22 @@ body.page-segment #filesPanel { display:none !important; }
 .sidebar-hint { padding:14px 16px; font-size:11px; color:var(--text2); line-height:1.6;
   border-bottom:1px solid var(--border); }
 .sidebar-hint b { color:var(--text); }
+.segment-config { padding:14px 16px; border-bottom:1px solid var(--border); }
+.segment-config .sc-ds-name { font-size:13px; font-weight:600; color:var(--text);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.segment-config .sc-ds-meta { font-size:11px; color:var(--text2); margin:3px 0 10px; }
+.segment-config .sc-stage { font-size:11px; margin-bottom:10px; display:flex;
+  align-items:center; gap:6px; }
+.segment-config .upload-params { display:grid !important; grid-template-columns:1fr 1fr; gap:8px; }
+.segment-config .upload-params label { font-size:10px; color:var(--text2);
+  text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:2px; }
+.segment-config .upload-params input { width:100%; background:var(--bg); color:var(--text);
+  border:1px solid var(--border); border-radius:4px; padding:4px 8px; font-size:12px; }
+.stage-badge { position:absolute; top:6px; right:6px; left:auto; font-size:9px;
+  font-weight:700; padding:2px 6px; border-radius:4px; letter-spacing:0.3px; }
+.stage-badge.done { background:rgba(63,185,80,0.2); color:var(--green); }
+.stage-badge.up { background:rgba(210,153,34,0.2); color:var(--orange); }
+.stage-badge.fail { background:rgba(248,81,73,0.2); color:var(--red); }
 
 /* 3D viewer semantic legend */
 .viewer-legend { position:absolute; bottom:52px; left:16px; background:rgba(22,27,34,0.9);
@@ -589,8 +605,20 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       </div>
       <div class="config-meta" id="modelMeta"></div>
     </div>
-    <div class="sidebar-hint">
+    <div class="sidebar-hint" id="segmentHint">
       Pick a point cloud on the <b>&#x1F4E5; Data Import</b> page and hit "Send to Segment". This page shows live segmentation progress and the 3D result.
+    </div>
+    <div class="segment-config" id="segmentConfig" style="display:none">
+      <div class="sc-ds">
+        <div class="sc-ds-name" id="segDsName">—</div>
+        <div class="sc-ds-meta" id="segDsMeta"></div>
+      </div>
+      <div class="sc-stage" id="segStage"></div>
+      <div class="upload-params">
+        <div><label>Tile Size (m)</label><input type="number" id="segTileSize" value="100" step="10" min="20"></div>
+        <div><label>Overlap (m)</label><input type="number" id="segOverlap" value="10" step="1" min="0"></div>
+      </div>
+      <button class="btn btn-primary" id="startSegBtn" onclick="startSegmentation()">&#x1F332; Start Segmentation</button>
     </div>
     <div class="upload-zone">
       <div class="drop-area" id="dropArea">
@@ -2170,6 +2198,7 @@ function switchPage(page) {
   document.getElementById('pageAnalyze').classList.toggle('active', page === 'analyze');
   if (page === 'analyze') refreshAnalysisPage();
   if (page === 'import') refreshMediaLibrary();
+  if (page === 'segment') showSegmentConfig();
 }
 
 async function refreshAnalysisPage() {
@@ -2452,6 +2481,16 @@ async function refreshMediaLibrary() {
   renderMediaGrid();
 }
 
+// Import/staging status shown on a card.
+function stageBadge(m) {
+  if (m.source === 'task') return {txt:'&#x2713; Processed', cls:'done'};
+  if (m.hpc_ready) return {txt:'&#x1F5A5; HPC Ready', cls:'done'};
+  if (m.hpc_stage === 'uploading') return {txt:`&#x2601; ${m.upload_progress||0}%`, cls:'up'};
+  if (m.hpc_stage === 'staging' || m.hpc_stage === 'pending') return {txt:'Staging…', cls:'up'};
+  if (m.hpc_stage === 'failed') return {txt:'Failed', cls:'fail'};
+  return null;
+}
+
 function renderMediaGrid() {
   const grid = document.getElementById('mediaGrid');
   document.getElementById('mediaCount').textContent = `${mediaItems.length} datasets`;
@@ -2464,13 +2503,14 @@ function renderMediaGrid() {
     const fmt = (m.format||'').toLowerCase();
     const badgeCls = ['las','laz','ply'].includes(fmt) ? fmt : 'las';
     const color = fmt==='laz'?'var(--green)':fmt==='ply'?'var(--orange)':'var(--accent)';
-    const doneBadge = m.source==='task' ? '<span class="media-badge done">&#x2713; Processed</span>' : '';
+    const sb = stageBadge(m);
+    const badge = sb ? `<span class="stage-badge ${sb.cls}">${sb.txt}</span>` : '';
     const pc = m.point_count!=null ? m.point_count.toLocaleString() : '—';
     const ext = (m.extent_x&&m.extent_y) ? `${m.extent_x}&#xD7;${m.extent_y}m` : (m.n_trees!=null?`${m.n_trees} trees`:'—');
     const sz = m.size!=null ? formatFileSize(m.size) : (m.file?formatFileSize(m.file.size):'—');
     html += `<div class="media-card ${m.id===selectedMediaId?'sel':''}" onclick="selectMediaItem('${m.id.replace(/'/g,"\\'")}')">
       <div class="media-thumb">
-        <span class="media-badge ${badgeCls}">${(fmt||'?').toUpperCase()}</span>${doneBadge}
+        <span class="media-badge ${badgeCls}">${(fmt||'?').toUpperCase()}</span>${badge}
         ${footprintSvg(m.extent_x, m.extent_y, color)}
       </div>
       <div class="media-meta">
@@ -2509,11 +2549,19 @@ function renderMediaInspector() {
   let action;
   if (m.source === 'task') {
     action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">View Result &amp; Analysis</button>`;
-  } else {
+  } else if (m.hpc_stage === 'failed') {
+    action = `<div style="color:var(--red);font-size:12px;margin-top:8px">Import failed: ${m.error||'unknown'}</div>`;
+  } else if (m.hpc_ready) {
     action = `<button class="btn btn-primary" onclick="sendToSegment('${m.id.replace(/'/g,"\\'")}')">&#x1F332; Send to Segment</button>`;
+  } else {
+    const lbl = m.hpc_stage === 'uploading' ? `Uploading ${m.upload_progress||0}%` : 'Staging to HPC…';
+    action = `<button class="btn btn-primary" disabled><span class="spin"></span> ${lbl}</button>`;
   }
+  const sub = m.source==='task' ? 'Completed task'
+            : m.source==='server' ? 'Server data'
+            : m.hpc_ready ? 'On research cloud + HPC' : 'Importing…';
   insp.innerHTML = `<h3>${m.name}</h3>
-    <div class="mi-sub">${m.source==='local'?'Local file (pending upload)':m.source==='task'?'Completed task':'Server data'}</div>
+    <div class="mi-sub">${sub}</div>
     <div class="mi-thumb">${footprintSvg(m.extent_x, m.extent_y, color)}</div>
     <div class="mi-specs">${specs}</div>${action}`;
 }
@@ -2523,25 +2571,124 @@ async function addLocalFile(file) {
   const id = 'local:'+file.name+':'+file.size;
   if (mediaItems.some(m => m.id === id)) { selectMediaItem(id); return; }
   const item = { id, source:'local', file, name:file.name,
-    format:ext.slice(1), size:file.size };
+    format:ext.slice(1), size:file.size, hpc_stage:'uploading', upload_progress:0 };
   mediaItems.unshift(item);
   renderMediaGrid();
+  selectMediaItem(id);
   if (ext === '.las' || ext === '.laz') {
     const h = await parseLasHeader(file);
-    if (h) { Object.assign(item, h); renderMediaGrid(); }
+    if (h) { Object.assign(item, h); renderMediaGrid(); renderMediaInspector(); }
   }
-  selectMediaItem(id);
+  // Import: upload to the pod, which stages it to the HPC in the background.
+  try {
+    const form = new FormData(); form.append('file', file);
+    const resp = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API}/import`);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+          item.upload_progress = Math.round(e.loaded / e.total * 100);
+          renderMediaGrid();
+          if (selectedMediaId === id) renderMediaInspector();
+        }
+      };
+      xhr.onload = () => xhr.status < 300 ? resolve(JSON.parse(xhr.responseText))
+        : reject(new Error(JSON.parse(xhr.responseText||'{}').detail || ('HTTP '+xhr.status)));
+      xhr.onerror = () => reject(new Error('network error'));
+      xhr.send(form);
+    });
+    item.dataset_id = resp.dataset_id;
+    item.hpc_stage = resp.hpc_stage;
+    renderMediaGrid();
+    if (selectedMediaId === id) renderMediaInspector();
+    pollDatasetStage(item);
+  } catch (e) {
+    item.hpc_stage = 'failed'; item.error = e.message;
+    renderMediaGrid();
+    if (selectedMediaId === id) renderMediaInspector();
+  }
 }
+
+function pollDatasetStage(item) {
+  if (!item.dataset_id) return;
+  const iv = setInterval(async () => {
+    try {
+      const d = await fetch(`${API}/import/${item.dataset_id}/status`).then(r=>r.json());
+      item.hpc_stage = d.hpc_stage; item.hpc_ready = d.hpc_ready;
+      item.hpc_progress = d.hpc_progress; item.error = d.error;
+      renderMediaGrid();
+      if (selectedMediaId === item.id) renderMediaInspector();
+      if (d.hpc_ready || d.hpc_stage === 'failed') clearInterval(iv);
+    } catch (e) { clearInterval(iv); }
+  }, 3000);
+}
+
+// Selected dataset queued for the Segment page (configured, not yet running).
+let pendingDataset = null;
 
 function sendToSegment(id) {
   const m = mediaItems.find(x => x.id === id);
-  if (!m) return;
+  if (!m || !m.dataset_id) return;
+  pendingDataset = m;
   switchPage('segment');
-  if (m.source === 'local') {
-    selectFile(m.file);
-    setTimeout(() => uploadBtn.click(), 100);
-  } else if (m.source === 'server') {
-    runDataInference(m.path);
+  showSegmentConfig();
+}
+
+function showSegmentConfig() {
+  const cfg = document.getElementById('segmentConfig');
+  const hint = document.getElementById('segmentHint');
+  if (!pendingDataset) { cfg.style.display='none'; hint.style.display='block'; return; }
+  hint.style.display = 'none';
+  cfg.style.display = 'block';
+  document.getElementById('segDsName').textContent = pendingDataset.name;
+  const pc = pendingDataset.point_count!=null ? pendingDataset.point_count.toLocaleString()+' pts' : '';
+  const ext = (pendingDataset.extent_x&&pendingDataset.extent_y) ? ` · ${pendingDataset.extent_x}×${pendingDataset.extent_y}m` : '';
+  document.getElementById('segDsMeta').textContent = pc + ext;
+  const stage = document.getElementById('segStage');
+  const btn = document.getElementById('startSegBtn');
+  if (pendingDataset.hpc_ready) {
+    stage.innerHTML = '<span style="color:var(--green)">&#x1F5A5; Ready on HPC — segmentation will start instantly</span>';
+    btn.disabled = false;
+  } else {
+    stage.innerHTML = '<span class="spin"></span> <span style="color:var(--orange)">Staging to HPC…</span>';
+    btn.disabled = true;
+    // keep checking until ready
+    const iv = setInterval(() => {
+      if (!pendingDataset) { clearInterval(iv); return; }
+      if (pendingDataset.hpc_ready) { clearInterval(iv); showSegmentConfig(); }
+      else if (pendingDataset.hpc_stage === 'failed') { clearInterval(iv); stage.innerHTML='<span style="color:var(--red)">Staging failed</span>'; }
+    }, 2000);
+  }
+}
+
+async function startSegmentation() {
+  if (!pendingDataset || !pendingDataset.dataset_id) return;
+  const btn = document.getElementById('startSegBtn');
+  btn.disabled = true;
+  const tile = +document.getElementById('segTileSize').value;
+  const overlap = +document.getElementById('segOverlap').value;
+  const model = document.getElementById('modelSelect').value || null;
+  try {
+    const resp = await fetch(`${API}/segment/${pendingDataset.dataset_id}`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tile_size:tile, overlap:overlap, model})
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Failed');
+    document.getElementById('segmentConfig').style.display = 'none';
+    document.getElementById('segmentHint').style.display = 'block';
+    taskData[data.task_id] = {task_id:data.task_id, status:'processing',
+      filename:pendingDataset.name, step:'queued', progress:5};
+    activeTaskId = data.task_id;
+    progressContainer.dataset.taskId = data.task_id;
+    progressContainer.classList.add('show');
+    document.getElementById('progressStages').innerHTML = '';
+    startPolling(data.task_id);
+    renderTaskList();
+    pendingDataset = null;
+  } catch (e) {
+    alert('Failed to start: ' + e.message);
+    btn.disabled = false;
   }
 }
 

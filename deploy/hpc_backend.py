@@ -68,8 +68,8 @@ export CUDA_VISIBLE_DEVICES=0
 cd {workdir}
 "$SING" exec --nv --bind {workdir}:/workspace --pwd /workspace {sif} \\
     python deploy/hpc_run_task.py \\
-        --input /workspace/deploy_jobs/{task_id}/input{suffix} \\
-        --task-dir /workspace/deploy_jobs/{task_id} \\
+        --input /workspace/deploy_jobs/{jobdir}/input{suffix} \\
+        --task-dir /workspace/deploy_jobs/{jobdir} \\
         --tile-size {tile_size} --overlap {overlap}
 rc=$?
 
@@ -189,52 +189,82 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
         _log(task_id, t_start, f"Connecting to HPC {HPC_USER}@{HPC_HOST}...")
         client = _connect()
         sftp = client.open_sftp()
-
-        # ── Compress + upload input ──
-        # The pod<->HPC link is capped at ~1 Gbps; LAZ compresses LAS ~3x
-        # in well under a second (lazrs is multithreaded), so convert first.
-        _exec(client, f"mkdir -p {rdir}")
-        upload_path, upload_suffix = input_path, suffix
-        if suffix == '.las':
-            try:
-                import laspy
-                laz_path = os.path.join(os.path.dirname(input_path), 'input.laz')
-                t0 = time.time()
-                laspy.read(input_path).write(laz_path)
-                ratio = os.path.getsize(input_path) / max(os.path.getsize(laz_path), 1)
-                _log(task_id, t_start,
-                     f"Compressed LAS->LAZ {ratio:.1f}x in {time.time() - t0:.1f}s")
-                upload_path, upload_suffix = laz_path, '.laz'
-            except Exception as e:
-                _log(task_id, t_start, f"LAZ compression skipped ({e}), sending raw")
-        size_mb = os.path.getsize(upload_path) / 1e6
-        _log(task_id, t_start, f"Uploading input ({size_mb:.1f} MB) to {rdir}...")
-        t0 = time.time()
-        sftp.put(upload_path, posixpath.join(rdir, f'input{upload_suffix}'))
-        dt = time.time() - t0
-        _log(task_id, t_start, f"Upload done ({size_mb / max(dt, 0.01):.0f} MB/s)")
-        if upload_path != input_path:
-            os.remove(upload_path)
+        hpc_suffix = _stage_input(client, sftp, input_path, suffix, rdir,
+                                  log=lambda m: _log(task_id, t_start, m))
         _update(task_id, 'uploading', progress=6)
+        _submit_poll_download(client, sftp, task_id, task_id, local_task_dir,
+                              t_start, hpc_suffix, tile_size, overlap)
+    except Exception as e:
+        _log(task_id, t_start, f"ERROR: {e}")
+        try:
+            with open(os.path.join(local_task_dir, 'inference.log'), 'w') as f:
+                f.write('\n'.join(tasks[task_id].get('log', [])) + '\n')
+        except Exception:
+            pass
+        _update(task_id, 'failed', progress=0, error=str(e))
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
-        # ── Generate + submit PBS job ──
-        _update(task_id, 'submitting', progress=7)
-        script = PBS_TEMPLATE.format(
-            queue=HPC_QUEUE, select=HPC_SELECT, walltime=HPC_WALLTIME,
-            group=HPC_GROUP,
-            workdir=HPC_WORKDIR, sif=HPC_SIF, rdir=rdir, task_id=task_id,
-            suffix=upload_suffix, tile_size=tile_size, overlap=overlap,
-        )
-        with sftp.open(posixpath.join(rdir, 'job.pbs'), 'w') as f:
-            f.write(script)
 
-        rc, out, err = _exec(client, f"cd {HPC_WORKDIR} && {QSUB} {rdir}/job.pbs")
-        if rc != 0:
-            raise RuntimeError(f"qsub failed: {err.strip() or out.strip()}")
-        job_id = out.strip().splitlines()[-1]
-        _log(task_id, t_start, f"Submitted PBS job {job_id} (queue {HPC_QUEUE})")
-        _update(task_id, 'queued', progress=8, hpc_job_id=job_id)
+def _stage_input(client, sftp, input_path, suffix, rdir, log=lambda m: None):
+    """Compress LAS->LAZ (pod<->HPC link is ~1 Gbps; LAZ is ~3x smaller) and
+    SFTP the input into rdir. Returns the on-HPC file suffix."""
+    _exec(client, f"mkdir -p {rdir}")
+    upload_path, upload_suffix = input_path, suffix
+    if suffix == '.las':
+        try:
+            import laspy
+            laz_path = os.path.join(os.path.dirname(input_path), 'input.laz')
+            t0 = time.time()
+            laspy.read(input_path).write(laz_path)
+            ratio = os.path.getsize(input_path) / max(os.path.getsize(laz_path), 1)
+            log(f"Compressed LAS->LAZ {ratio:.1f}x in {time.time() - t0:.1f}s")
+            upload_path, upload_suffix = laz_path, '.laz'
+        except Exception as e:
+            log(f"LAZ compression skipped ({e}), sending raw")
+    size_mb = os.path.getsize(upload_path) / 1e6
+    log(f"Uploading input ({size_mb:.1f} MB) to {rdir}...")
+    t0 = time.time()
+    sftp.put(upload_path, posixpath.join(rdir, f'input{upload_suffix}'))
+    log(f"Upload done ({size_mb / max(time.time() - t0, 0.01):.0f} MB/s)")
+    if upload_path != input_path:
+        os.remove(upload_path)
+    return upload_suffix
 
+
+def _submit_poll_download(client, sftp, task_id, jobdir, local_task_dir, t_start,
+                          hpc_suffix, tile_size, overlap):
+    """Generate the PBS job over the input already in deploy_jobs/{jobdir},
+    qsub it, stream progress/log/tiles, then download the result bundle."""
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', jobdir)
+
+    # Clear any stale outputs (a pre-staged dir may be reused) but keep the input.
+    _exec(client, "cd %s && rm -rf status.json inference.log result.ply stats.json "
+                  "viewer tile_*_preview.ply result_bundle.tar.gz pbs_out.log "
+                  "2>/dev/null; true" % rdir)
+
+    _update(task_id, 'submitting', progress=7)
+    script = PBS_TEMPLATE.format(
+        queue=HPC_QUEUE, select=HPC_SELECT, walltime=HPC_WALLTIME,
+        group=HPC_GROUP, workdir=HPC_WORKDIR, sif=HPC_SIF, rdir=rdir,
+        jobdir=jobdir, task_id=task_id, suffix=hpc_suffix,
+        tile_size=tile_size, overlap=overlap,
+    )
+    with sftp.open(posixpath.join(rdir, 'job.pbs'), 'w') as f:
+        f.write(script)
+
+    rc, out, err = _exec(client, f"cd {HPC_WORKDIR} && {QSUB} {rdir}/job.pbs")
+    if rc != 0:
+        raise RuntimeError(f"qsub failed: {err.strip() or out.strip()}")
+    job_id = out.strip().splitlines()[-1]
+    _log(task_id, t_start, f"Submitted PBS job {job_id} (queue {HPC_QUEUE})")
+    _update(task_id, 'queued', progress=8, hpc_job_id=job_id)
+
+    if True:
         # ── Poll until done ──
         status_rpath = posixpath.join(rdir, 'status.json')
         log_rpath = posixpath.join(rdir, 'inference.log')
@@ -347,6 +377,54 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
         _update(task_id, 'completed', progress=100,
                 stats=stats, result_ply=output_ply, completed=time.time())
 
+
+# --- Import-time staging (data lands on the pod and HPC before segmentation) ---
+
+def stage_to_hpc(datasets_proxy, dataset_id, input_path, suffix):
+    """Compress + push a freshly-imported dataset to the HPC so segmentation
+    can start instantly later. Updates the datasets dict, does NOT qsub."""
+    def upd(**kw):
+        d = dict(datasets_proxy[dataset_id])
+        d.update(kw)
+        d['updated'] = time.time()
+        datasets_proxy[dataset_id] = d
+
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', dataset_id)
+    client = None
+    try:
+        upd(hpc_stage='staging', hpc_progress=10)
+        client = _connect()
+        sftp = client.open_sftp()
+        hpc_suffix = _stage_input(client, sftp, input_path, suffix, rdir)
+        upd(hpc_stage='ready', hpc_ready=True, hpc_suffix=hpc_suffix,
+            hpc_progress=100)
+    except Exception as e:
+        upd(hpc_stage='failed', error=str(e))
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def run_hpc_inference_prestaged(tasks_proxy, task_id, dataset_id, hpc_suffix,
+                                tile_size, overlap):
+    """Segment a dataset already staged on the HPC — skips upload, qsub only."""
+    global tasks
+    tasks = tasks_proxy
+    t_start = time.time()
+    results_dir = os.environ.get('RESULTS_DIR', '/tmp/ffformer_results')
+    local_task_dir = os.path.join(results_dir, task_id)
+    os.makedirs(local_task_dir, exist_ok=True)
+    client = None
+    try:
+        _update(task_id, 'queued', progress=5)
+        _log(task_id, t_start, "Data already on HPC; submitting job...")
+        client = _connect()
+        sftp = client.open_sftp()
+        _submit_poll_download(client, sftp, task_id, dataset_id, local_task_dir,
+                              t_start, hpc_suffix, tile_size, overlap)
     except Exception as e:
         _log(task_id, t_start, f"ERROR: {e}")
         try:
