@@ -785,8 +785,13 @@ def health():
 
 @app.post("/import")
 async def import_dataset(file: UploadFile = File(...)):
-    """Import a point cloud: save on the pod and (HPC backend) push it to the
-    HPC in the background so segmentation can start instantly later."""
+    """Import a point cloud.
+
+    With the HPC backend the upload is streamed to the pod and the HPC *in
+    parallel* — the pod relays each chunk to the HPC as it arrives — so
+    browser->pod and pod->HPC overlap and the dataset is HPC-ready the moment
+    the upload finishes. The local backend keeps a pod copy to segment from.
+    """
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ('.las', '.laz', '.ply'):
         raise HTTPException(400, f"Unsupported format: {suffix}. Use .las, .laz, or .ply")
@@ -795,39 +800,61 @@ async def import_dataset(file: UploadFile = File(...)):
     ds_dir = os.path.join(IMPORT_DIR, ds_id)
     os.makedirs(ds_dir, exist_ok=True)
     input_path = os.path.join(ds_dir, f'input{suffix}')
-
-    await file.seek(0)
-    with open(input_path, 'wb') as f:
-        while True:
-            chunk = await file.read(8 * 1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-    if os.path.getsize(input_path) == 0:
-        shutil.rmtree(ds_dir, ignore_errors=True)
-        raise HTTPException(400, "Uploaded file is empty")
-
     datasets[ds_id] = {
         'id': ds_id, 'filename': file.filename, 'format': suffix.lstrip('.'),
-        'size': os.path.getsize(input_path), 'input_path': input_path,
-        'hpc_stage': 'pending', 'hpc_progress': 0, 'hpc_ready': False,
-        'created': time.time(), 'updated': time.time(),
+        'size': 0, 'hpc_stage': 'uploading', 'hpc_progress': 0,
+        'hpc_ready': False, 'created': time.time(), 'updated': time.time(),
     }
 
-    # Push to HPC in the background (HPC backend only; local backend keeps the
-    # pod copy and segments from it directly).
-    if INFERENCE_BACKEND == 'hpc':
-        _ensure_paramiko()
-        from deploy.hpc_backend import stage_to_hpc
-        proc = multiprocessing.Process(
-            target=stage_to_hpc, args=(datasets, ds_id, input_path, suffix),
-            daemon=True)
-        proc.start()
-    else:
-        d = dict(datasets[ds_id])
-        d.update(hpc_stage='ready', hpc_ready=True, hpc_progress=100,
-                 hpc_suffix=suffix)
+    def _dset(**kw):
+        d = dict(datasets[ds_id]); d.update(kw); d['updated'] = time.time()
         datasets[ds_id] = d
+
+    await file.seek(0)
+
+    if INFERENCE_BACKEND == 'hpc':
+        # Relay the stream to the HPC in a writer thread while we read the body.
+        import queue as _queue
+        _ensure_paramiko()
+        from deploy.hpc_backend import stream_import_to_hpc
+        cq = _queue.Queue(maxsize=8)   # ~32 MB in-flight buffer + backpressure
+        state = {}
+        writer = threading.Thread(target=stream_import_to_hpc,
+                                  args=(ds_id, suffix, cq, state), daemon=True)
+        writer.start()
+        total = 0
+        try:
+            while True:
+                chunk = await file.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                await asyncio.to_thread(cq.put, chunk)  # blocks if HPC lags
+                total += len(chunk)
+        finally:
+            await asyncio.to_thread(cq.put, None)       # sentinel: end stream
+            await asyncio.to_thread(writer.join)
+        if total == 0:
+            _dset(hpc_stage='failed', error='empty upload')
+            raise HTTPException(400, "Uploaded file is empty")
+        if state.get('error'):
+            _dset(hpc_stage='failed', error=state['error'])
+            raise HTTPException(502, f"HPC staging failed: {state['error']}")
+        _dset(size=total, hpc_stage='ready', hpc_ready=True, hpc_progress=100,
+              hpc_suffix=state.get('hpc_suffix', suffix))
+    else:
+        with open(input_path, 'wb') as f:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        total = os.path.getsize(input_path)
+        if total == 0:
+            shutil.rmtree(ds_dir, ignore_errors=True)
+            del datasets[ds_id]
+            raise HTTPException(400, "Uploaded file is empty")
+        _dset(size=total, input_path=input_path, hpc_stage='ready',
+              hpc_ready=True, hpc_progress=100, hpc_suffix=suffix)
 
     return JSONResponse({'dataset_id': ds_id, 'hpc_stage': datasets[ds_id]['hpc_stage']})
 

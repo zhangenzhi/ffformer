@@ -380,6 +380,40 @@ def _submit_poll_download(client, sftp, task_id, jobdir, local_task_dir, t_start
 
 # --- Import-time staging (data lands on the pod and HPC before segmentation) ---
 
+def stream_import_to_hpc(ds_id, suffix, chunk_queue, state):
+    """Relay an upload straight to the HPC as it arrives.
+
+    Runs in a writer thread: the /import request feeds byte chunks into
+    chunk_queue (None ends it) while this thread SFTP-writes them to the HPC,
+    so browser->pod and pod->HPC overlap. No LAZ compression (that needs the
+    whole file first) — worth it only because pod->HPC is fast enough that
+    overlap beats the ~3x compression saving.
+    """
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', ds_id)
+    client = None
+    try:
+        client = _connect()
+        sftp = client.open_sftp()
+        _exec(client, f"mkdir -p {rdir}")
+        with sftp.open(posixpath.join(rdir, f'input{suffix}'), 'wb') as rf:
+            rf.set_pipelined(True)  # pipeline writes — critical for throughput
+            while True:
+                chunk = chunk_queue.get()
+                if chunk is None:
+                    break
+                rf.write(chunk)
+        state['hpc_suffix'] = suffix
+        state['ok'] = True
+    except Exception as e:
+        state['error'] = str(e)
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def stage_to_hpc(datasets_proxy, dataset_id, input_path, suffix):
     """Compress + push a freshly-imported dataset to the HPC so segmentation
     can start instantly later. Updates the datasets dict, does NOT qsub."""
