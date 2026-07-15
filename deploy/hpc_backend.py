@@ -414,6 +414,52 @@ def stream_import_to_hpc(ds_id, suffix, chunk_queue, state):
                 pass
 
 
+HPC_DATA_DIRS = os.environ.get('HPC_DATA_DIRS', 'examples')
+
+
+def list_hpc_data():
+    """List point-cloud files sitting on the HPC (the 'server data' the
+    dashboard shows) — datasets already on the cluster, ready to segment."""
+    client = _connect()
+    try:
+        files = []
+        for d in HPC_DATA_DIRS.split(':'):
+            base = posixpath.join(HPC_WORKDIR, d.strip())
+            rc, out, _ = _exec(
+                client, f"find {base} -maxdepth 3 -type f "
+                        r"\( -name '*.las' -o -name '*.laz' -o -name '*.ply' \) "
+                        r"-printf '%s\t%p\n' 2>/dev/null")
+            for line in out.strip().splitlines():
+                if '\t' not in line:
+                    continue
+                size, p = line.split('\t', 1)
+                files.append({'path': p, 'filename': posixpath.basename(p),
+                              'size': int(size),
+                              'type': p.rsplit('.', 1)[-1].lower()})
+        files.sort(key=lambda f: f['filename'])
+        return files
+    finally:
+        client.close()
+
+
+def stage_hpc_file(ds_id, src_path, suffix=None):
+    """Turn an existing HPC file into a dataset by copying it into the dataset
+    dir inside the HPC filesystem (instant, no transfer). Returns the suffix."""
+    suffix = suffix or ('.' + src_path.rsplit('.', 1)[-1].lower())
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', ds_id)
+    client = _connect()
+    try:
+        rc, out, err = _exec(
+            client, f"test -f '{src_path}' && mkdir -p {rdir} && "
+                    f"cp '{src_path}' {rdir}/input{suffix} && echo ok")
+        if rc != 0 or 'ok' not in out:
+            raise RuntimeError(err.strip() or out.strip() or
+                               f"file not found: {src_path}")
+    finally:
+        client.close()
+    return suffix
+
+
 def stage_to_hpc(datasets_proxy, dataset_id, input_path, suffix):
     """Compress + push a freshly-imported dataset to the HPC so segmentation
     can start instantly later. Updates the datasets dict, does NOT qsub."""

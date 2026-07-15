@@ -729,7 +729,7 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
         <span class="txt"><b>Drop LAS / LAZ / PLY point cloud</b>or click to select a file to import</span>
       </div>
       <input type="file" id="mediaFileInput" accept=".las,.laz,.ply" hidden>
-      <button class="btn-sm" onclick="refreshMediaLibrary()">Refresh server data</button>
+      <button class="btn-sm" onclick="refreshMediaLibrary()">Refresh HPC data</button>
       <span class="media-count" id="mediaCount">—</span>
     </div>
     <div class="media-grid" id="mediaGrid"></div>
@@ -2551,14 +2551,14 @@ function renderMediaInspector() {
     action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">View Result &amp; Analysis</button>`;
   } else if (m.hpc_stage === 'failed') {
     action = `<div style="color:var(--red);font-size:12px;margin-top:8px">Import failed: ${m.error||'unknown'}</div>`;
-  } else if (m.hpc_ready) {
+  } else if (m.hpc_ready || m.source === 'server') {
     action = `<button class="btn btn-primary" onclick="sendToSegment('${m.id.replace(/'/g,"\\'")}')">&#x1F332; Send to Segment</button>`;
   } else {
     const lbl = m.hpc_stage === 'uploading' ? `Uploading ${m.upload_progress||0}%` : 'Staging to HPC…';
     action = `<button class="btn btn-primary" disabled><span class="spin"></span> ${lbl}</button>`;
   }
   const sub = m.source==='task' ? 'Completed task'
-            : m.source==='server' ? 'Server data'
+            : m.source==='server' ? 'On HPC'
             : m.hpc_ready ? 'On research cloud + HPC' : 'Importing…';
   insp.innerHTML = `<h3>${m.name}</h3>
     <div class="mi-sub">${sub}</div>
@@ -2626,9 +2626,23 @@ function pollDatasetStage(item) {
 // Selected dataset queued for the Segment page (configured, not yet running).
 let pendingDataset = null;
 
-function sendToSegment(id) {
+async function sendToSegment(id) {
   const m = mediaItems.find(x => x.id === id);
-  if (!m || !m.dataset_id) return;
+  if (!m) return;
+  // Server-side HPC files aren't datasets yet — import them first (an instant
+  // HPC-internal copy, no transfer) to get a dataset_id.
+  if (!m.dataset_id && m.source === 'server') {
+    try {
+      const resp = await fetch(`${API}/import/hpc`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({path: m.path})
+      });
+      const d = await resp.json();
+      if (!resp.ok) throw new Error(d.detail || 'Failed');
+      m.dataset_id = d.dataset_id; m.hpc_ready = true; m.hpc_stage = 'ready';
+    } catch(e) { alert('Import failed: ' + e.message); return; }
+  }
+  if (!m.dataset_id) return;
   pendingDataset = m;
   switchPage('segment');
   showSegmentConfig();

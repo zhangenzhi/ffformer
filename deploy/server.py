@@ -859,6 +859,41 @@ async def import_dataset(file: UploadFile = File(...)):
     return JSONResponse({'dataset_id': ds_id, 'hpc_stage': datasets[ds_id]['hpc_stage']})
 
 
+class _ImportHpc(BaseModel):
+    path: str
+
+
+@app.post("/import/hpc")
+def import_hpc(req: _ImportHpc):
+    """Import a file already on the HPC as a dataset — an instant HPC-internal
+    copy into the dataset dir (no transfer), marked ready for segmentation."""
+    if INFERENCE_BACKEND != 'hpc':
+        raise HTTPException(400, "HPC import requires the HPC backend")
+    suffix = os.path.splitext(req.path)[1].lower()
+    if suffix not in ('.las', '.laz', '.ply'):
+        raise HTTPException(400, f"Unsupported format: {suffix}")
+    ds_id = str(uuid.uuid4())[:8]
+    datasets[ds_id] = {
+        'id': ds_id, 'filename': os.path.basename(req.path),
+        'format': suffix.lstrip('.'), 'size': 0, 'hpc_stage': 'staging',
+        'hpc_progress': 50, 'hpc_ready': False, 'source_path': req.path,
+        'created': time.time(), 'updated': time.time(),
+    }
+    _ensure_paramiko()
+    from deploy.hpc_backend import stage_hpc_file
+    try:
+        hpc_suffix = stage_hpc_file(ds_id, req.path, suffix)
+    except Exception as e:
+        d = dict(datasets[ds_id]); d.update(hpc_stage='failed', error=str(e))
+        datasets[ds_id] = d
+        raise HTTPException(502, f"Import failed: {e}")
+    d = dict(datasets[ds_id])
+    d.update(hpc_stage='ready', hpc_ready=True, hpc_progress=100,
+             hpc_suffix=hpc_suffix)
+    datasets[ds_id] = d
+    return JSONResponse({'dataset_id': ds_id, 'hpc_stage': 'ready'})
+
+
 @app.get("/import/{ds_id}/status")
 def import_status(ds_id: str):
     if ds_id not in datasets:
@@ -1317,7 +1352,16 @@ def switch_model_endpoint(req: _ModelSwitchRequest):
 
 @app.get("/data")
 def list_data():
-    """List available LiDAR data files on the server."""
+    """List available point-cloud files. With the HPC backend the data lives
+    on the HPC (that's where inference runs), so scan there; otherwise scan
+    the pod's own dirs."""
+    if INFERENCE_BACKEND == 'hpc':
+        _ensure_paramiko()
+        from deploy.hpc_backend import list_hpc_data
+        try:
+            return JSONResponse(list_hpc_data())
+        except Exception as e:
+            raise HTTPException(502, f"Cannot list HPC data: {e}")
     scan_dirs = [WORK_DIR, '/workspace/data/']
     data_files = []
     seen = set()
