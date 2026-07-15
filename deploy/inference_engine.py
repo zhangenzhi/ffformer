@@ -199,7 +199,18 @@ class ForestFormerEngine:
 
         # Rebuild test dataloader with new data (cfg changes don't affect existing loader)
         from mmengine.runner import Runner as _Runner
-        self._runner._test_dataloader = _Runner.build_dataloader(cfg.test_dataloader)
+        loader = _Runner.build_dataloader(cfg.test_dataloader)
+        self._runner._test_dataloader = loader
+        # mmengine builds the test loop once and then REUSES that instance
+        # (build_test_loop returns an existing BaseLoop unchanged), so its
+        # .dataloader stays frozen to the first tile's temp dir. Each tile
+        # writes a fresh temp dir and deletes it on exit, so from the 2nd tile
+        # on the loop reads the first tile's already-deleted dir and fails with
+        # "input_scene_test.bin not found". Point the live loop at the new
+        # dataloader so every tile reads its own data.
+        from mmengine.runner.loops import BaseLoop as _BaseLoop
+        if isinstance(getattr(self._runner, '_test_loop', None), _BaseLoop):
+            self._runner._test_loop.dataloader = loader
 
         # Run
         print(f'[Engine] Running inference on {N:,} points ...')
