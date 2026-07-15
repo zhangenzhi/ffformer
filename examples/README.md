@@ -8,6 +8,11 @@ A small bundled sample to verify the whole ForestFormer3D pipeline works.
   segmentation, and score-based merge — not just a single tile. Runs in a
   few minutes on one GPU.
 
+  > The `.laz` is **not** committed to git (point-cloud data doesn't belong
+  > in the repo). It lives alongside the code on the HPC at
+  > `/lustre1/work/c30636/ffformer/examples/sample_forest.laz`. The scripts
+  > below reference it there; for the dashboard, grab it from that path.
+
 ## Option A — through the dashboard (full pipeline: import → segment → analyze)
 
 1. Open the dashboard and sign in.
