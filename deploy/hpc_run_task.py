@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,6 +31,7 @@ class StatusReporter:
         self.status_path = os.path.join(task_dir, 'status.json')
         self.log_path = os.path.join(task_dir, 'inference.log')
         self.t_start = time.time()
+        self._lock = threading.Lock()  # update() is called from the GPU sampler too
         self.state = {
             'step': 'starting', 'progress': 0, 'stats': {},
             'completed_tiles': 0, 'error': None, 'updated': time.time(),
@@ -37,13 +39,14 @@ class StatusReporter:
         self._flush()
 
     def update(self, step=None, progress=None, **extra):
-        if step is not None:
-            self.state['step'] = step
-        if progress is not None:
-            self.state['progress'] = progress
-        self.state.update(extra)
-        self.state['updated'] = time.time()
-        self._flush()
+        with self._lock:
+            if step is not None:
+                self.state['step'] = step
+            if progress is not None:
+                self.state['progress'] = progress
+            self.state.update(extra)
+            self.state['updated'] = time.time()
+            self._flush()
 
     def log(self, message):
         elapsed = round(time.time() - self.t_start, 1)
@@ -160,6 +163,21 @@ def _generate_tile_preview(ply_path, offsets, preview_path):
 def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
     rep = StatusReporter(task_dir)
     suffix = os.path.splitext(input_path)[1].lower()
+
+    # Sample GPU telemetry continuously in the background. Sampling only at tile
+    # boundaries catches the GPU idle between tiles and reports 0% utilization;
+    # a steady 2s poll reflects the real load during inference.
+    node = os.environ.get('HOSTNAME') or os.uname().nodename
+    _stop_hw = threading.Event()
+
+    def _hw_sampler():
+        while not _stop_hw.wait(2):
+            s = _gpu_stats()
+            if s:
+                rep.update(hw={'node': node, **s})
+    _hw_thread = threading.Thread(target=_hw_sampler, daemon=True)
+    _hw_thread.start()
+
     try:
         # ── Step 1: Read ──
         rep.update('reading', 10)
@@ -228,8 +246,7 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
             progress = 20 + int(65 * i / n_tiles)
             rep.update('inferring', progress,
                        stats={**base_stats, 'current_tile': i + 1,
-                              'tile_points': tile['n_points']},
-                       hw={'node': node, **(_gpu_stats() or {})})
+                              'tile_points': tile['n_points']})
             rep.log(f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
 
             tile_xyz = xyz[tile['global_idx']]
@@ -329,6 +346,8 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
         rep.log(traceback.format_exc())
         rep.update('failed', 0, error=str(e))
         return 1
+    finally:
+        _stop_hw.set()
 
 
 def main():
