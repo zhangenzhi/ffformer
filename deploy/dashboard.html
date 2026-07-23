@@ -913,10 +913,15 @@ function updateProgressUI(data) {
   if (step === 'splitting') {
     detailText = `${(stats.n_tiles||0)} tiles (${stats.tile_size||100}m)`;
   } else if (step === 'inferring') {
-    const tile = stats.current_tile || 0;
-    const total = stats.n_tiles || 1;
-    const tilePts = stats.tile_points || 0;
-    detailText = `Tile ${tile}/${total} · ${tilePts.toLocaleString()} pts`;
+    if (stats.regions_total) {
+      // Whole-scene mode: progress over sliding windows.
+      detailText = `Inferring · ${(stats.regions_done||0).toLocaleString()}/${stats.regions_total.toLocaleString()} windows`;
+    } else {
+      const tile = stats.current_tile || 0;
+      const total = stats.n_tiles || 1;
+      const tilePts = stats.tile_points || 0;
+      detailText = `Tile ${tile}/${total} · ${tilePts.toLocaleString()} pts`;
+    }
     if (elapsed > 0 && data.progress > 20 && data.progress < 85) {
       const eta = (elapsed / (data.progress - 20) * (85 - data.progress));
       detailText += ` · ETA ~${fmtDuration(eta)}`;
@@ -944,8 +949,10 @@ function updateProgressUI(data) {
       timeStr = st ? fmtDuration(st.duration) : '';
     } else if (i === currentIdx) {
       state = 'active';
-      // Show tile progress within Infer stage
-      if (s.key === 'inferring' && stats.n_tiles > 1) {
+      // Show fine-grained progress within Infer stage
+      if (s.key === 'inferring' && stats.regions_total) {
+        barPct = Math.round((stats.regions_done || 0) / stats.regions_total * 100);
+      } else if (s.key === 'inferring' && stats.n_tiles > 1) {
         barPct = Math.round(((stats.current_tile || 1) - 1) / stats.n_tiles * 100);
       } else {
         barPct = 50;
@@ -958,7 +965,8 @@ function updateProgressUI(data) {
     }
 
     let nameLabel = s.label;
-    if (s.key === 'inferring' && stats.n_tiles > 1 && state === 'active') {
+    if (s.key === 'inferring' && state === 'active' && !stats.regions_total
+        && stats.n_tiles > 1) {
       nameLabel = `Infer ${stats.current_tile||'?'}/${stats.n_tiles}`;
     }
 

@@ -146,7 +146,8 @@ class ForestFormer3D(nn.Module):
     # ──────────────────── Inference ────────────────────
 
     @torch.no_grad()
-    def predict(self, points, output_path=None, pts_semantic_gt=None, pts_instance_gt=None):
+    def predict(self, points, output_path=None, pts_semantic_gt=None, pts_instance_gt=None,
+                progress_cb=None, use_amp=True):
         """Full-scene inference with sliding window.
 
         Args:
@@ -205,57 +206,66 @@ class ForestFormer3D(nn.Module):
             coordinates, features, inverse_mapping2, spatial_shape = self.collate([pc3])
             x_sparse = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
 
-            # ⑤ Backbone
-            x = self.extract_feat(x_sparse)
+            # ⑤–⑪ Neural forward in mixed precision (fp16 on CUDA). autocast only
+            # affects float matmul/conv; int/index ops and numpy accumulation are
+            # untouched. Decoder outputs are cast back to fp32 before thresholding.
+            with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+                # ⑤ Backbone
+                x = self.extract_feat(x_sparse)
 
-            # ⑥ Aux heads
-            embed_logits = self.Embed(x[0])
-            bi_semantic_logits = self.BiSemantic(x[0])
-            semantic_predictions_bi = torch.argmax(bi_semantic_logits, dim=1)
-            tree_indices = torch.where(semantic_predictions_bi == 1)[0]
+                # ⑥ Aux heads
+                embed_logits = self.Embed(x[0])
+                bi_semantic_logits = self.BiSemantic(x[0])
+                semantic_predictions_bi = torch.argmax(bi_semantic_logits, dim=1)
+                tree_indices = torch.where(semantic_predictions_bi == 1)[0]
 
-            # ⑦ NN mapping (optimized: grid inverse or cdist fallback)
-            if nn_idx_pc1 is None:
-                nn_idx_pc1_parts = []
-                for ss in range(0, pc1.shape[0], self.chunk):
-                    ee = min(ss + self.chunk, pc1.shape[0])
-                    nn_idx_pc1_parts.append(
-                        torch.cdist(pc1[ss:ee].float(), pc3.float()).argmin(1))
-                nn_idx_pc1 = torch.cat(nn_idx_pc1_parts)
+                # ⑦ NN mapping (optimized: grid inverse or cdist fallback)
+                if nn_idx_pc1 is None:
+                    nn_idx_pc1_parts = []
+                    for ss in range(0, pc1.shape[0], self.chunk):
+                        ee = min(ss + self.chunk, pc1.shape[0])
+                        nn_idx_pc1_parts.append(
+                            torch.cdist(pc1[ss:ee].float(), pc3.float()).argmin(1))
+                    nn_idx_pc1 = torch.cat(nn_idx_pc1_parts)
 
-            if tree_indices.numel() > 1:
-                # ⑧ Grid-based query selection
-                tree_xyz = pc3[tree_indices]
-                selected_local = grid_subsample_queries(tree_xyz, self.query_point_num)
-                selected = tree_indices[selected_local]
-                queries = [x[0][selected]]
+                if tree_indices.numel() > 1:
+                    # ⑧ Grid-based query selection
+                    tree_xyz = pc3[tree_indices]
+                    selected_local = grid_subsample_queries(tree_xyz, self.query_point_num)
+                    selected = tree_indices[selected_local]
+                    queries = [x[0][selected]]
 
-                # ⑨ Decoder
-                x_dec = self.decoder(x, queries)
+                    # ⑨ Decoder
+                    x_dec = self.decoder(x, queries)
 
-                # ⑩ Predict masks + scores
-                masks, scores, sem_res = self._predict_by_feat(
-                    x_dec, inverse_mapping2, pc3, selected)
+                    # ⑩ Predict masks + scores
+                    masks, scores, sem_res = self._predict_by_feat(
+                        x_dec, inverse_mapping2, pc3, selected)
+                    # scores back to fp32 for stable thresholding / accumulation.
+                    # NOTE: masks stays as-is — it is used as a boolean index.
+                    scores = scores.float()
 
-                # ⑪ Post-process: score filter + edge filter + merge
-                self._process_cylinder_results(
-                    masks, scores, sem_res, pc1, pc3, pc1_indices, nn_idx_pc1,
-                    region, score_th1, all_pre_ins, global_instance_scores,
-                    best_masks, max_instance, votes_counter, region_mask)
-                max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
-            else:
-                # No trees: just vote semantic labels
-                proj_logits = bi_semantic_logits[inverse_mapping2]
-                sem_pred = torch.argmax(proj_logits, dim=1)
-                cyl_sem = sem_pred[nn_idx_pc1]
-                ids_np = torch.where(region_mask)[0].cpu().numpy()
-                sem_np = cyl_sem.cpu().numpy().astype(int)
-                np.add.at(votes_counter, (ids_np, sem_np), 1)
+                    # ⑪ Post-process: score filter + edge filter + merge
+                    self._process_cylinder_results(
+                        masks, scores, sem_res, pc1, pc3, pc1_indices, nn_idx_pc1,
+                        region, score_th1, all_pre_ins, global_instance_scores,
+                        best_masks, max_instance, votes_counter, region_mask)
+                    max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
+                else:
+                    # No trees: just vote semantic labels
+                    proj_logits = bi_semantic_logits[inverse_mapping2]
+                    sem_pred = torch.argmax(proj_logits, dim=1)
+                    cyl_sem = sem_pred[nn_idx_pc1]
+                    ids_np = torch.where(region_mask)[0].cpu().numpy()
+                    sem_np = cyl_sem.cpu().numpy().astype(int)
+                    np.add.at(votes_counter, (ids_np, sem_np), 1)
 
             del pc1, pc1_indices, pc2, pc2_indices, pc3, pc3_indices
             del embed_logits, bi_semantic_logits
             if region_idx % 50 == 49:
                 torch.cuda.empty_cache()
+            if progress_cb is not None:
+                progress_cb(region_idx + 1, len(regions))
 
         # Global post-processing
         final_semantic = votes_counter.argmax(1)

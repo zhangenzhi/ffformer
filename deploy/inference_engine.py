@@ -95,7 +95,7 @@ class ForestFormerEngine:
         self._model = model.to(self.device).eval()
         print(f'[Engine] Model loaded on {self.device} ({n:,} params)')
 
-    def predict(self, xyz, output_ply_path=None, global_zmin=None):
+    def predict(self, xyz, output_ply_path=None, global_zmin=None, progress_cb=None):
         """Run inference on a point cloud.
 
         Args:
@@ -103,6 +103,9 @@ class ForestFormerEngine:
             output_ply_path: optional path to save a result PLY (normalized coords).
             global_zmin: if provided, use as the Z offset instead of the local
                          min-z (keeps tiles in a shared vertical frame).
+            progress_cb: optional callable(done, total) invoked per sliding
+                         window, for driving a progress bar during whole-scene
+                         inference.
 
         Returns:
             dict with keys: points, offsets, semantic_pred, instance_pred,
@@ -127,8 +130,9 @@ class ForestFormerEngine:
 
         print(f'[Engine] Running inference on {N:,} points ...')
         t0 = time.time()
+        use_amp = os.environ.get('FF_USE_AMP', '1') not in ('0', 'false', 'False')
         with torch.no_grad():
-            out = self._model.predict(points)
+            out = self._model.predict(points, progress_cb=progress_cb, use_amp=use_amp)
         dt = time.time() - t0
         print(f'[Engine] Inference done in {dt:.1f}s')
 

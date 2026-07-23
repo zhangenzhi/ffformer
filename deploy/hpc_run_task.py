@@ -201,98 +201,126 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
         dx, dy = xmax - xmin, ymax - ymin
         rep.log(f"{N:,} points, extent {dx:.0f}x{dy:.0f}m")
 
-        # ── Step 2: Split into tiles ──
-        rep.update('splitting', 15)
-        nx = max(1, int(np.ceil(dx / tile_size)))
-        ny = max(1, int(np.ceil(dy / tile_size)))
-        rep.log(f"Tile grid: {nx}x{ny} ({tile_size}m, overlap={overlap}m)")
-
-        tiles = []
-        for ix in range(nx):
-            for iy in range(ny):
-                tx0 = xmin + ix * tile_size - overlap
-                tx1 = xmin + (ix + 1) * tile_size + overlap
-                ty0 = ymin + iy * tile_size - overlap
-                ty1 = ymin + (iy + 1) * tile_size + overlap
-                mask = ((xyz[:, 0] >= tx0) & (xyz[:, 0] <= tx1) &
-                        (xyz[:, 1] >= ty0) & (xyz[:, 1] <= ty1))
-                n_pts = int(mask.sum())
-                if n_pts < 100:
-                    continue
-                tiles.append({'global_idx': np.where(mask)[0], 'n_points': n_pts})
-
-        n_tiles = len(tiles)
-        rep.log(f"{n_tiles} non-empty tiles")
-        base_stats = {'n_original': N, 'n_processed': N,
-                      'n_tiles': n_tiles, 'tile_size': tile_size}
-        rep.update('splitting', 18, stats=base_stats)
-
-        # ── Step 3: Load model ONCE ──
+        # ── Step 2: Load model ONCE ──
         from deploy.inference_engine import ForestFormerEngine
-        rep.log("Loading model (once for all tiles)...")
+        rep.log("Loading model...")
         engine = ForestFormerEngine(config_path=config_path,
                                     checkpoint_path=checkpoint_path)
         rep.log("Model loaded")
 
-        # ── Step 4: Infer each tile ──
+        # ── Step 3: Inference ──
+        # The pure engine does full-scene sliding-window inference internally,
+        # so external tiling is redundant for normal scenes and only wastes time
+        # re-processing overlap regions. Feed the whole cloud in one predict();
+        # tile only as a memory-safety fallback for very large clouds.
+        WHOLE_MAX = int(os.environ.get('FF_WHOLE_SCENE_MAX', 4_000_000))
         sem_pred = np.full(N, -1, dtype=np.int32)
         inst_pred = np.full(N, -1, dtype=np.int32)
         scores_arr = np.full(N, -1.0, dtype=np.float32)
-        max_instance_id = 0
         t_infer_start = time.time()
 
-        node = os.environ.get('HOSTNAME') or os.uname().nodename
-        for i, tile in enumerate(tiles):
-            progress = 20 + int(65 * i / n_tiles)
-            rep.update('inferring', progress,
-                       stats={**base_stats, 'current_tile': i + 1,
-                              'tile_points': tile['n_points']})
-            rep.log(f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
+        if N <= WHOLE_MAX:
+            # ── Whole-scene inference (default, fp16 AMP) ──
+            base_stats = {'n_original': N, 'n_processed': N,
+                          'n_tiles': 1, 'tile_size': tile_size, 'mode': 'whole'}
+            rep.update('inferring', 20, stats=base_stats)
+            rep.log(f"Whole-scene inference on {N:,} points...")
 
-            tile_xyz = xyz[tile['global_idx']]
-            tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
-            try:
-                t0 = time.time()
-                result = engine.predict(tile_xyz, output_ply_path=tile_ply,
-                                        global_zmin=zmin)
-                dt = round(time.time() - t0, 1)
+            _last_pct = [-1]
 
-                tile_sem = result.get('semantic_pred')
-                tile_inst = result.get('instance_pred')
-                tile_scores = result.get('instance_scores')
+            def _cb(done, total):
+                pct = int(100 * done / max(total, 1))
+                if pct != _last_pct[0]:
+                    _last_pct[0] = pct
+                    rep.update('inferring', 20 + int(65 * done / max(total, 1)),
+                               stats={**base_stats, 'regions_done': done,
+                                      'regions_total': total})
 
-                if tile_inst is not None and tile_scores is not None:
-                    gi = tile['global_idx']
-                    for j in range(len(gi)):
-                        g = gi[j]
-                        sc = float(tile_scores[j])
-                        if sc > scores_arr[g]:
-                            if tile_sem is not None:
-                                sem_pred[g] = int(tile_sem[j])
-                            inst_id = int(tile_inst[j])
-                            inst_pred[g] = (inst_id + max_instance_id) if inst_id >= 0 else -1
-                            scores_arr[g] = sc
-                    tile_max = int(tile_inst.max()) if len(tile_inst) > 0 else 0
-                    if tile_max >= 0:
-                        max_instance_id += tile_max + 1
+            result = engine.predict(xyz, output_ply_path=None,
+                                    global_zmin=zmin, progress_cb=_cb)
+            sem_pred = np.asarray(result['semantic_pred'], dtype=np.int32)
+            inst_pred = np.asarray(result['instance_pred'], dtype=np.int32)
+            scores_arr = np.asarray(result['instance_scores'], dtype=np.float32)
+        else:
+            # ── Tiled fallback for very large clouds (bounds CPU accumulators) ──
+            rep.update('splitting', 15)
+            nx = max(1, int(np.ceil(dx / tile_size)))
+            ny = max(1, int(np.ceil(dy / tile_size)))
+            rep.log(f"Large cloud ({N:,} pts > {WHOLE_MAX:,}); tiling {nx}x{ny} "
+                    f"({tile_size}m, overlap={overlap}m)")
 
-                tile_trees = len(set(tile_inst[tile_inst >= 0].tolist())) if tile_inst is not None else 0
-                rep.log(f"Tile {i+1}/{n_tiles}: {tile_trees} trees in {dt}s")
+            tiles = []
+            for ix in range(nx):
+                for iy in range(ny):
+                    tx0 = xmin + ix * tile_size - overlap
+                    tx1 = xmin + (ix + 1) * tile_size + overlap
+                    ty0 = ymin + iy * tile_size - overlap
+                    ty1 = ymin + (iy + 1) * tile_size + overlap
+                    mask = ((xyz[:, 0] >= tx0) & (xyz[:, 0] <= tx1) &
+                            (xyz[:, 1] >= ty0) & (xyz[:, 1] <= ty1))
+                    n_pts = int(mask.sum())
+                    if n_pts < 100:
+                        continue
+                    tiles.append({'global_idx': np.where(mask)[0], 'n_points': n_pts})
 
-                offsets = [float(tile_xyz[:, 0].mean()),
-                           float(tile_xyz[:, 1].mean()), zmin]
+            n_tiles = len(tiles)
+            rep.log(f"{n_tiles} non-empty tiles")
+            base_stats = {'n_original': N, 'n_processed': N,
+                          'n_tiles': n_tiles, 'tile_size': tile_size, 'mode': 'tiled'}
+            rep.update('splitting', 18, stats=base_stats)
+
+            max_instance_id = 0
+            for i, tile in enumerate(tiles):
+                progress = 20 + int(65 * i / n_tiles)
+                rep.update('inferring', progress,
+                           stats={**base_stats, 'current_tile': i + 1,
+                                  'tile_points': tile['n_points']})
+                rep.log(f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
+
+                tile_xyz = xyz[tile['global_idx']]
+                tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
                 try:
-                    _generate_tile_preview(
-                        tile_ply, offsets,
-                        os.path.join(task_dir, f'tile_{i}_preview.ply'))
-                except Exception:
-                    pass
+                    t0 = time.time()
+                    result = engine.predict(tile_xyz, output_ply_path=tile_ply,
+                                            global_zmin=zmin)
+                    dt = round(time.time() - t0, 1)
 
-                rep.update('inferring', progress, completed_tiles=i + 1)
-                if os.path.exists(tile_ply):
-                    os.remove(tile_ply)
-            except Exception as e:
-                rep.log(f"Tile {i+1}/{n_tiles} failed: {e}")
+                    tile_sem = result.get('semantic_pred')
+                    tile_inst = result.get('instance_pred')
+                    tile_scores = result.get('instance_scores')
+
+                    if tile_inst is not None and tile_scores is not None:
+                        gi = tile['global_idx']
+                        for j in range(len(gi)):
+                            g = gi[j]
+                            sc = float(tile_scores[j])
+                            if sc > scores_arr[g]:
+                                if tile_sem is not None:
+                                    sem_pred[g] = int(tile_sem[j])
+                                inst_id = int(tile_inst[j])
+                                inst_pred[g] = (inst_id + max_instance_id) if inst_id >= 0 else -1
+                                scores_arr[g] = sc
+                        tile_max = int(tile_inst.max()) if len(tile_inst) > 0 else 0
+                        if tile_max >= 0:
+                            max_instance_id += tile_max + 1
+
+                    tile_trees = len(set(tile_inst[tile_inst >= 0].tolist())) if tile_inst is not None else 0
+                    rep.log(f"Tile {i+1}/{n_tiles}: {tile_trees} trees in {dt}s")
+
+                    offsets = [float(tile_xyz[:, 0].mean()),
+                               float(tile_xyz[:, 1].mean()), zmin]
+                    try:
+                        _generate_tile_preview(
+                            tile_ply, offsets,
+                            os.path.join(task_dir, f'tile_{i}_preview.ply'))
+                    except Exception:
+                        pass
+
+                    rep.update('inferring', progress, completed_tiles=i + 1)
+                    if os.path.exists(tile_ply):
+                        os.remove(tile_ply)
+                except Exception as e:
+                    rep.log(f"Tile {i+1}/{n_tiles} failed: {e}")
 
         inference_time = round(time.time() - t_infer_start, 1)
 
