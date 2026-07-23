@@ -1,57 +1,82 @@
-"""ForestFormer3D inference engine — standalone model wrapper.
+"""ForestFormer3D inference engine — pure-PyTorch backend.
 
-Encapsulates the full pipeline: load checkpoint → accept point cloud →
-run cylindrical-region inference → return predictions.
+Drop-in replacement for the old mmengine/mmdet3d-based engine. It wraps the
+pure-PyTorch reimplementation (the `ff3d` package under FF3D/) and keeps the
+exact same public interface, so hpc_run_task.py and server.py need no changes:
 
-Can be used directly in Python or as the backend for the API server.
+    engine = ForestFormerEngine(checkpoint_path='.../epoch_3000_fix.pth')
+    result = engine.predict(xyz, output_ply_path=..., global_zmin=...)
+    # result = {
+    #     'points': (N,3),           # original coordinates
+    #     'offsets': (3,),           # [mean_x, mean_y, min_z] used to normalize
+    #     'semantic_pred': (N,),     # 0=ground, 1=wood, 2=leaf, -1=unvoted
+    #     'instance_pred': (N,),     # -1=unassigned, 0+ = tree id
+    #     'instance_scores': (N,),   # confidence per point
+    # }
+
+The pure model does full-scene sliding-window inference internally, so a single
+predict() call handles whatever point cloud it is given (a tile, or a whole
+scene). The `config_path` argument is accepted for backward compatibility and
+ignored — the pure model carries its own architecture config.
 """
 import os
 import sys
 import time
-import tempfile
 
 import numpy as np
 import torch
 
-# Ensure project root is importable
+# Project root = repo root; the pure package lives under FF3D/.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PROJECT_ROOT)
+FF3D_ROOT = os.path.join(PROJECT_ROOT, 'FF3D')
+for _p in (PROJECT_ROOT, FF3D_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-# Patch mmcv version before any mmlab imports
-import mmcv_compat  # noqa: E402, F401
+# Architecture config — must match the checkpoint (same as tools/infer.py).
+_DECODER_CFG = dict(
+    num_layers=6, num_semantic_queries=3, in_channels=32,
+    d_model=256, num_heads=8, hidden_dim=1024, dropout=0.0,
+    activation='gelu', fix_attention=True, objectness_flag=True, attn_mask=True)
 
-from mmengine.config import Config, ConfigDict
-from mmengine.runner import Runner
+
+def _write_result_ply(path, xyz, semantic, instance, scores):
+    """Write an ASCII PLY matching hpc_run_task's expected schema.
+
+    Coordinates are written as given (callers pass normalized coords so the
+    downstream tile-preview restorer can re-add the offsets).
+    """
+    N = len(xyz)
+    header = (
+        "ply\nformat ascii 1.0\n"
+        f"element vertex {N}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property int semantic_pred\nproperty int instance_pred\n"
+        "property float score\nend_header\n"
+    )
+    data = np.column_stack([
+        xyz,
+        semantic.astype(np.float64),
+        instance.astype(np.float64),
+        scores.astype(np.float64),
+    ])
+    with open(path, 'w') as f:
+        f.write(header)
+    with open(path, 'ab') as f:
+        np.savetxt(f, data, fmt='%.6f %.6f %.6f %d %d %.4f')
 
 
 class ForestFormerEngine:
-    """Stateful inference engine for ForestFormer3D.
-
-    Usage:
-        engine = ForestFormerEngine(
-            config_path='configs/jpeaks_test.py',
-            checkpoint_path='work_dirs/clean_forestformer/epoch_3000_fix.pth',
-        )
-        result = engine.predict(xyz_array)  # (N,3) float32
-        # result = {
-        #     'points': (N,3),
-        #     'semantic_pred': (N,),     # 0=ground, 1=wood, 2=leaf
-        #     'instance_pred': (N,),     # -1=unassigned, 0+ = tree id
-        #     'instance_scores': (N,),   # confidence per point
-        # }
-    """
+    """Stateful inference engine backed by the pure-PyTorch ForestFormer3D."""
 
     def __init__(self, config_path=None, checkpoint_path=None, device='cuda:0'):
-        if config_path is None:
-            config_path = os.path.join(PROJECT_ROOT, 'configs', 'jpeaks_test.py')
+        # config_path kept for API compatibility with the old mm* engine; unused.
         if checkpoint_path is None:
             checkpoint_path = os.path.join(
                 PROJECT_ROOT, 'work_dirs', 'clean_forestformer', 'epoch_3000_fix.pth')
-
         self.device = device
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
-        self._runner = None
         self._model = None
 
     def _ensure_loaded(self):
@@ -59,81 +84,29 @@ class ForestFormerEngine:
         if self._model is not None:
             return
 
-        print(f'[Engine] Loading config: {self.config_path}')
-        cfg = Config.fromfile(self.config_path)
+        from ff3d.model import ForestFormer3D
+        from ff3d.model.forestformer3d import load_pretrained
 
-        # Load checkpoint (no spconv permutation needed)
+        print(f'[Engine] Building pure ForestFormer3D')
+        model = ForestFormer3D(decoder_cfg=_DECODER_CFG)
         print(f'[Engine] Loading checkpoint: {self.checkpoint_path}')
-        checkpoint = torch.load(self.checkpoint_path, map_location='cpu')
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp:
-            torch.save(checkpoint, tmp.name)
-            cfg.load_from = tmp.name
-
-        if cfg.model.get('test_cfg') is None:
-            cfg.model.test_cfg = ConfigDict()
-
-        cfg.work_dir = tempfile.mkdtemp(prefix='ffformer_')
-        cfg.model.test_cfg['output_dir'] = cfg.work_dir
-
-        # Create dummy dataset so Runner can initialize without real data
-        self._dummy_dir = tempfile.mkdtemp(prefix='ffformer_dummy_')
-        self._create_dummy_data(self._dummy_dir)
-        cfg.test_dataloader.dataset.data_root = self._dummy_dir + '/'
-        cfg.test_dataloader.dataset.ann_file = 'info.pkl'
-
-        # Ensure project root stays in sys.path (mmengine Runner may reset it)
-        if PROJECT_ROOT not in sys.path:
-            sys.path.insert(0, PROJECT_ROOT)
-        os.environ['PYTHONPATH'] = PROJECT_ROOT + ':' + os.environ.get('PYTHONPATH', '')
-
-        runner = Runner.from_cfg(cfg)
-        self._runner = runner
-        self._model = runner.model
-        self._model.eval()
-        print(f'[Engine] Model loaded on {self.device}')
-
-    @staticmethod
-    def _create_dummy_data(tmpdir):
-        """Create minimal dummy dataset files for Runner initialization."""
-        import pickle
-        scene_name = 'dummy_test'
-        for subdir in ('points', 'semantic_mask', 'instance_mask'):
-            os.makedirs(os.path.join(tmpdir, subdir), exist_ok=True)
-        # 3 dummy points
-        np.array([[0, 0, 0]], dtype=np.float32).tofile(
-            os.path.join(tmpdir, 'points', f'{scene_name}.bin'))
-        np.zeros(1, dtype=np.int64).tofile(
-            os.path.join(tmpdir, 'semantic_mask', f'{scene_name}.bin'))
-        np.zeros(1, dtype=np.int64).tofile(
-            os.path.join(tmpdir, 'instance_mask', f'{scene_name}.bin'))
-        info = {
-            'metainfo': {'categories': {'ground': 0, 'wood': 1, 'leaf': 2},
-                         'dataset': 'ForAINetV2', 'info_version': '1.1'},
-            'data_list': [{
-                'lidar_points': {'num_pts_feats': 3,
-                                 'lidar_path': f'{scene_name}.bin'},
-                'instances': [],
-                'pts_semantic_mask_path': f'{scene_name}.bin',
-                'pts_instance_mask_path': f'{scene_name}.bin',
-                'axis_align_matrix': np.eye(4).tolist(),
-            }],
-        }
-        with open(os.path.join(tmpdir, 'info.pkl'), 'wb') as f:
-            pickle.dump(info, f)
+        load_pretrained(model, self.checkpoint_path)
+        n = sum(p.numel() for p in model.parameters())
+        self._model = model.to(self.device).eval()
+        print(f'[Engine] Model loaded on {self.device} ({n:,} params)')
 
     def predict(self, xyz, output_ply_path=None, global_zmin=None):
         """Run inference on a point cloud.
 
         Args:
-            xyz: numpy array (N, 3) float32/float64, raw coordinates.
-                 Will be normalized internally (center XY, shift Z).
-            output_ply_path: optional path to save result PLY.
-            global_zmin: if provided, use this as Z offset instead of tile's
-                         local min_z. Matches tile_and_infer.py normalization.
+            xyz: numpy array (N, 3), raw coordinates.
+            output_ply_path: optional path to save a result PLY (normalized coords).
+            global_zmin: if provided, use as the Z offset instead of the local
+                         min-z (keeps tiles in a shared vertical frame).
 
         Returns:
-            dict with keys: points, semantic_pred, instance_pred, instance_scores
+            dict with keys: points, offsets, semantic_pred, instance_pred,
+            instance_scores.
         """
         self._ensure_loaded()
 
@@ -141,7 +114,7 @@ class ForestFormerEngine:
         N = len(xyz)
         assert xyz.shape == (N, 3), f"Expected (N,3), got {xyz.shape}"
 
-        # Normalize: center XY per tile, shift Z to global min
+        # Normalize: center XY, shift Z to (global) min — same as tools/infer.py.
         mean_x, mean_y = xyz[:, 0].mean(), xyz[:, 1].mean()
         min_z = global_zmin if global_zmin is not None else xyz[:, 2].min()
         xyz_norm = xyz.copy()
@@ -150,157 +123,34 @@ class ForestFormerEngine:
         xyz_norm[:, 2] -= min_z
         xyz_norm = xyz_norm.astype(np.float32)
 
-        # Prepare temporary data files
-        import pickle
-        tmpdir = tempfile.mkdtemp(prefix='ffformer_data_')
-        scene_name = 'input_scene_test'
+        points = torch.from_numpy(xyz_norm).float().to(self.device)
 
-        # Write bin files
-        os.makedirs(os.path.join(tmpdir, 'points'), exist_ok=True)
-        os.makedirs(os.path.join(tmpdir, 'semantic_mask'), exist_ok=True)
-        os.makedirs(os.path.join(tmpdir, 'instance_mask'), exist_ok=True)
-
-        xyz_norm.tofile(os.path.join(tmpdir, 'points', f'{scene_name}.bin'))
-        np.zeros(N, dtype=np.int64).tofile(
-            os.path.join(tmpdir, 'semantic_mask', f'{scene_name}.bin'))
-        np.zeros(N, dtype=np.int64).tofile(
-            os.path.join(tmpdir, 'instance_mask', f'{scene_name}.bin'))
-
-        # Write pkl
-        info = {
-            'metainfo': {'categories': {'ground': 0, 'wood': 1, 'leaf': 2},
-                         'dataset': 'ForAINetV2', 'info_version': '1.1'},
-            'data_list': [{
-                'lidar_points': {'num_pts_feats': 3,
-                                 'lidar_path': f'{scene_name}.bin'},
-                'instances': [],
-                'pts_semantic_mask_path': f'{scene_name}.bin',
-                'pts_instance_mask_path': f'{scene_name}.bin',
-                'axis_align_matrix': np.eye(4).tolist(),
-            }],
-        }
-        pkl_path = os.path.join(tmpdir, 'info.pkl')
-        with open(pkl_path, 'wb') as f:
-            pickle.dump(info, f)
-
-        # Reconfigure dataloader with actual data
-        cfg = self._runner.cfg
-        cfg.test_dataloader.dataset.data_root = tmpdir + '/'
-        cfg.test_dataloader.dataset.ann_file = 'info.pkl'
-
-        if output_ply_path:
-            out_dir = os.path.dirname(output_ply_path) or '.'
-            cfg.model.test_cfg['output_dir'] = out_dir
-            # The built model holds its own copy of test_cfg (registry build
-            # copies the config), so mutate the live instance too — otherwise
-            # the PLY goes to the stale work_dir tempdir from _ensure_loaded.
-            if getattr(self._model, 'test_cfg', None) is not None:
-                self._model.test_cfg['output_dir'] = out_dir
-
-        # Rebuild test dataloader with new data (cfg changes don't affect existing loader)
-        from mmengine.runner import Runner as _Runner
-        loader = _Runner.build_dataloader(cfg.test_dataloader)
-        self._runner._test_dataloader = loader
-        # mmengine builds the test loop once and then REUSES that instance
-        # (build_test_loop returns an existing BaseLoop unchanged), so its
-        # .dataloader stays frozen to the first tile's temp dir. Each tile
-        # writes a fresh temp dir and deletes it on exit, so from the 2nd tile
-        # on the loop reads the first tile's already-deleted dir and fails with
-        # "input_scene_test.bin not found". Point the live loop at the new
-        # dataloader so every tile reads its own data.
-        from mmengine.runner.loops import BaseLoop as _BaseLoop
-        if isinstance(getattr(self._runner, '_test_loop', None), _BaseLoop):
-            self._runner._test_loop.dataloader = loader
-
-        # Run
         print(f'[Engine] Running inference on {N:,} points ...')
         t0 = time.time()
-
-        try:
-            self._runner.test()
-        except (IndexError, Exception) as e:
-            # Evaluator may crash (no GT) but PLY is already saved
-            if 'out of bounds' in str(e) or 'IndexError' in str(type(e).__name__):
-                print(f'[Engine] Evaluator error (expected, no GT): {e}')
-            else:
-                raise
-
+        with torch.no_grad():
+            out = self._model.predict(points)
         dt = time.time() - t0
         print(f'[Engine] Inference done in {dt:.1f}s')
 
-        # Parse output PLY
-        result = {
+        semantic = np.asarray(out['semantic_pred'], dtype=np.int64)
+        instance = np.asarray(out['instance_pred'], dtype=np.int64)
+        scores = np.asarray(out['instance_scores'], dtype=np.float32)
+
+        if output_ply_path:
+            _write_result_ply(output_ply_path, xyz_norm, semantic, instance, scores)
+
+        return {
             'points': xyz,
             'points_normalized': xyz_norm,
             'offsets': np.array([mean_x, mean_y, min_z]),
-            'semantic_pred': None,
-            'instance_pred': None,
-            'instance_scores': None,
+            'semantic_pred': semantic,
+            'instance_pred': instance,
+            'instance_scores': scores,
         }
-
-        # Find output PLY
-        out_dir = cfg.model.test_cfg.get('output_dir', cfg.work_dir)
-        ply_candidates = [
-            os.path.join(out_dir, f'{scene_name}.ply'),
-            os.path.join(out_dir, 'input_scene_test.ply'),
-        ]
-        for ply_path in ply_candidates:
-            if os.path.exists(ply_path):
-                result.update(self._parse_output_ply(ply_path))
-                if output_ply_path and ply_path != output_ply_path:
-                    import shutil
-                    shutil.copy2(ply_path, output_ply_path)
-                break
-
-        # Cleanup
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-        return result
-
-    @staticmethod
-    def _parse_output_ply(ply_path):
-        """Parse the output PLY file into arrays."""
-        fields = []
-        with open(ply_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('property'):
-                    fields.append(line.split()[-1])
-                elif line == 'end_header':
-                    break
-
-            rows = []
-            for line in f:
-                rows.append(line.strip().split())
-
-        col = {name: idx for idx, name in enumerate(fields)}
-        n = len(rows)
-        result = {}
-        if 'semantic_pred' in col:
-            result['semantic_pred'] = np.array(
-                [int(rows[i][col['semantic_pred']]) for i in range(n)])
-        if 'instance_pred' in col:
-            result['instance_pred'] = np.array(
-                [int(rows[i][col['instance_pred']]) for i in range(n)])
-        if 'score' in col:
-            result['instance_scores'] = np.array(
-                [float(rows[i][col['score']]) for i in range(n)])
-        return result
 
 
 def predict_las(las_path, output_ply=None, subsample=0.05, max_points=None):
-    """Convenience function: LAS file → predictions.
-
-    Args:
-        las_path: path to .las/.laz file
-        output_ply: optional output PLY path
-        subsample: voxel size for subsampling (meters), None to keep all
-        max_points: maximum number of points
-
-    Returns:
-        dict with prediction arrays
-    """
+    """Convenience: LAS file → predictions (mostly for local/manual testing)."""
     import laspy
 
     print(f'Reading {las_path} ...')

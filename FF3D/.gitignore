@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+work_dirs/
+results/
+*.pth
+*.ply
+*.o*
+.vscode/

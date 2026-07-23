@@ -1,0 +1,8 @@
+torch>=2.0
+spconv-cu118
+MinkowskiEngine
+numpy
+laspy
+plyfile
+tqdm
+pyyaml
