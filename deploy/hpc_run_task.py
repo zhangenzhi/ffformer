@@ -105,24 +105,28 @@ def _read_ply_xyz(path):
 
 
 def _save_result_ply(path, xyz, semantic, instance, scores):
+    """Write a binary little-endian PLY. Fast + compact — ASCII np.savetxt is
+    ~1-2h and ~30GB for a 600M-point cloud; binary is seconds and ~14GB."""
     N = len(xyz)
+    rec = np.empty(N, dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                             ('semantic_pred', '<i4'), ('instance_pred', '<i4'),
+                             ('score', '<f4')])
+    rec['x'] = xyz[:, 0]
+    rec['y'] = xyz[:, 1]
+    rec['z'] = xyz[:, 2]
+    rec['semantic_pred'] = semantic
+    rec['instance_pred'] = instance
+    rec['score'] = scores
     header = (
-        "ply\nformat ascii 1.0\n"
+        "ply\nformat binary_little_endian 1.0\n"
         f"element vertex {N}\n"
         "property float x\nproperty float y\nproperty float z\n"
         "property int semantic_pred\nproperty int instance_pred\n"
         "property float score\nend_header\n"
     )
-    data = np.column_stack([
-        xyz,
-        semantic.astype(np.float64),
-        instance.astype(np.float64),
-        scores.astype(np.float64),
-    ])
-    with open(path, 'w') as f:
-        f.write(header)
-    with open(path, 'ab') as f:
-        np.savetxt(f, data, fmt='%.6f %.6f %.6f %d %d %.4f')
+    with open(path, 'wb') as f:
+        f.write(header.encode('ascii'))
+        rec.tofile(f)
 
 
 def _generate_tile_preview(ply_path, offsets, preview_path):
@@ -214,6 +218,7 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
         # re-processing overlap regions. Feed the whole cloud in one predict();
         # tile only as a memory-safety fallback for very large clouds.
         WHOLE_MAX = int(os.environ.get('FF_WHOLE_SCENE_MAX', 4_000_000))
+        PREVIEW_MAX = int(os.environ.get('FF_PREVIEW_MAX', 2_000_000))
         sem_pred = np.full(N, -1, dtype=np.int32)
         inst_pred = np.full(N, -1, dtype=np.int32)
         scores_arr = np.full(N, -1.0, dtype=np.float32)
@@ -278,7 +283,10 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
                 rep.log(f"Tile {i+1}/{n_tiles}: {tile['n_points']:,} pts")
 
                 tile_xyz = xyz[tile['global_idx']]
-                tile_ply = os.path.join(task_dir, f'tile_{i}.ply')
+                # Per-tile previews are a UI nicety; skip them (and the per-tile
+                # PLY write) for large tiles to avoid huge ASCII dumps.
+                tile_ply = (os.path.join(task_dir, f'tile_{i}.ply')
+                            if tile['n_points'] <= PREVIEW_MAX else None)
                 try:
                     t0 = time.time()
                     result = engine.predict(tile_xyz, output_ply_path=tile_ply,
@@ -290,16 +298,17 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
                     tile_scores = result.get('instance_scores')
 
                     if tile_inst is not None and tile_scores is not None:
+                        # Vectorized score-based merge (a per-point Python loop
+                        # here would be ~15M iters/tile on dense clouds).
                         gi = tile['global_idx']
-                        for j in range(len(gi)):
-                            g = gi[j]
-                            sc = float(tile_scores[j])
-                            if sc > scores_arr[g]:
-                                if tile_sem is not None:
-                                    sem_pred[g] = int(tile_sem[j])
-                                inst_id = int(tile_inst[j])
-                                inst_pred[g] = (inst_id + max_instance_id) if inst_id >= 0 else -1
-                                scores_arr[g] = sc
+                        ts = np.asarray(tile_scores, dtype=np.float32)
+                        better = ts > scores_arr[gi]
+                        sel = gi[better]
+                        scores_arr[sel] = ts[better]
+                        if tile_sem is not None:
+                            sem_pred[sel] = np.asarray(tile_sem)[better].astype(np.int32)
+                        ti = np.asarray(tile_inst)[better]
+                        inst_pred[sel] = np.where(ti >= 0, ti + max_instance_id, -1).astype(np.int32)
                         tile_max = int(tile_inst.max()) if len(tile_inst) > 0 else 0
                         if tile_max >= 0:
                             max_instance_id += tile_max + 1
@@ -307,18 +316,19 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
                     tile_trees = len(set(tile_inst[tile_inst >= 0].tolist())) if tile_inst is not None else 0
                     rep.log(f"Tile {i+1}/{n_tiles}: {tile_trees} trees in {dt}s")
 
-                    offsets = [float(tile_xyz[:, 0].mean()),
-                               float(tile_xyz[:, 1].mean()), zmin]
-                    try:
-                        _generate_tile_preview(
-                            tile_ply, offsets,
-                            os.path.join(task_dir, f'tile_{i}_preview.ply'))
-                    except Exception:
-                        pass
+                    if tile_ply:
+                        offsets = [float(tile_xyz[:, 0].mean()),
+                                   float(tile_xyz[:, 1].mean()), zmin]
+                        try:
+                            _generate_tile_preview(
+                                tile_ply, offsets,
+                                os.path.join(task_dir, f'tile_{i}_preview.ply'))
+                        except Exception:
+                            pass
+                        if os.path.exists(tile_ply):
+                            os.remove(tile_ply)
 
                     rep.update('inferring', progress, completed_tiles=i + 1)
-                    if os.path.exists(tile_ply):
-                        os.remove(tile_ply)
                 except Exception as e:
                     rep.log(f"Tile {i+1}/{n_tiles} failed: {e}")
 

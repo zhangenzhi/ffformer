@@ -43,23 +43,41 @@ UNASSIGNED_COLOR = np.array([80, 80, 80], dtype=np.uint8)
 POINT_SIZE = 16
 
 
+_PLY_NP = {'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+           'int': '<i4', 'int32': '<i4', 'uint': '<u4', 'uint32': '<u4',
+           'short': '<i2', 'ushort': '<u2', 'char': 'i1', 'uchar': 'u1',
+           'int8': 'i1', 'uint8': 'u1', 'uint16': '<u2'}
+
+
 def parse_ply_header(filepath):
-    """Parse PLY header, return field names, vertex count, header line count."""
+    """Parse PLY header. Returns (col, num_vertices, header_lines, num_fields,
+    fmt, header_bytes, rec_dtype). fmt is 'ascii' or 'binary_little_endian';
+    rec_dtype is the structured numpy dtype for the binary body."""
     fields = []
+    types = []
     num_vertices = 0
     header_lines = 0
-    with open(filepath, 'r') as f:
-        for line in f:
+    header_bytes = 0
+    fmt = 'ascii'
+    with open(filepath, 'rb') as f:
+        for raw in f:
+            header_bytes += len(raw)
             header_lines += 1
-            stripped = line.strip()
-            if stripped.startswith('element vertex'):
+            stripped = raw.decode('ascii', 'ignore').strip()
+            if stripped.startswith('format'):
+                fmt = stripped.split()[1]
+            elif stripped.startswith('element vertex'):
                 num_vertices = int(stripped.split()[-1])
             elif stripped.startswith('property'):
-                fields.append(stripped.split()[-1])
+                parts = stripped.split()
+                types.append(parts[1])
+                fields.append(parts[-1])
             elif stripped == 'end_header':
                 break
     col = {name: idx for idx, name in enumerate(fields)}
-    return col, num_vertices, header_lines, len(fields)
+    rec_dtype = (np.dtype([(fields[i], _PLY_NP.get(types[i], '<f4'))
+                           for i in range(len(fields))]) if fields else None)
+    return col, num_vertices, header_lines, len(fields), fmt, header_bytes, rec_dtype
 
 
 try:
@@ -70,12 +88,25 @@ except ImportError:
 
 
 def load_ply_chunked(filepath, col, num_vertices, header_lines, num_fields,
+                     fmt='ascii', header_bytes=0, rec_dtype=None,
                      chunk_size=5_000_000):
     """Generator: yield chunks of (xyz, colors, flags) from PLY.
 
-    Uses pandas for ~5-10x faster parsing than np.loadtxt.
+    Binary bodies are read directly with np.fromfile; ASCII uses pandas for
+    ~5-10x faster parsing than np.loadtxt.
     """
     fields = list(col.keys())
+
+    if fmt != 'ascii':
+        with open(filepath, 'rb') as f:
+            f.seek(header_bytes)
+            for start in range(0, num_vertices, chunk_size):
+                nrows = min(chunk_size, num_vertices - start)
+                rec = np.fromfile(f, dtype=rec_dtype, count=nrows)
+                data = np.column_stack([rec[name].astype(np.float64)
+                                        for name in fields])
+                yield _process_chunk(data, col)
+        return
 
     for start in range(0, num_vertices, chunk_size):
         nrows = min(chunk_size, num_vertices - start)
@@ -183,7 +214,8 @@ def build_octree(filepath, output_dir, node_budget=50_000, max_depth=8):
     - Then distribute cached data to octree leaf nodes
     - Subsample and build hierarchy bottom-up
     """
-    col, num_vertices, header_lines, num_fields = parse_ply_header(filepath)
+    col, num_vertices, header_lines, num_fields, fmt, header_bytes, rec_dtype = \
+        parse_ply_header(filepath)
     print(f'Total points: {num_vertices:,}')
     print(f'Node budget: {node_budget:,}, max depth: {max_depth}')
 
@@ -205,7 +237,8 @@ def build_octree(filepath, output_dir, node_budget=50_000, max_depth=8):
 
     with open(cache_path, 'wb') as cache_f:
         for xyz, colors, flags in load_ply_chunked(filepath, col, num_vertices,
-                                                    header_lines, num_fields):
+                                                    header_lines, num_fields,
+                                                    fmt, header_bytes, rec_dtype):
             n = len(xyz)
             bbox_min = np.minimum(bbox_min, xyz.min(axis=0))
             bbox_max = np.maximum(bbox_max, xyz.max(axis=0))

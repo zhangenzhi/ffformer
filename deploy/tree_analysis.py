@@ -20,17 +20,45 @@ OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://ollama:11434')
 OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'qwen2.5:7b-instruct')
 
 
+_PLY_NP = {'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+           'int': '<i4', 'int32': '<i4', 'uint': '<u4', 'uint32': '<u4',
+           'short': '<i2', 'ushort': '<u2', 'char': 'i1', 'uchar': 'u1',
+           'int8': 'i1', 'uint8': 'u1', 'uint16': '<u2'}
+
+
 def _read_result_ply(path):
-    """Read result.ply -> (xyz, semantic, instance, score) arrays."""
-    fields = []
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith('property'):
-                fields.append(line.split()[-1])
+    """Read result.ply -> (xyz, semantic, instance, score). Supports both
+    ASCII and binary_little_endian PLY."""
+    fields, types = [], []
+    fmt = 'ascii'
+    header_bytes = 0
+    with open(path, 'rb') as f:
+        for raw in f:
+            header_bytes += len(raw)
+            line = raw.decode('ascii', 'ignore').strip()
+            if line.startswith('format'):
+                fmt = line.split()[1]
+            elif line.startswith('property'):
+                parts = line.split()
+                types.append(parts[1])
+                fields.append(parts[-1])
             elif line == 'end_header':
                 break
-        col = {name: idx for idx, name in enumerate(fields)}
+    col = {name: idx for idx, name in enumerate(fields)}
+
+    if fmt != 'ascii':
+        rec_dtype = np.dtype([(fields[i], _PLY_NP.get(types[i], '<f4'))
+                              for i in range(len(fields))])
+        rec = np.fromfile(path, dtype=rec_dtype, offset=header_bytes)
+        xyz = np.column_stack([rec['x'], rec['y'], rec['z']]).astype(np.float64)
+        return (xyz, rec['semantic_pred'].astype(np.int32),
+                rec['instance_pred'].astype(np.int32),
+                rec['score'].astype(np.float32))
+
+    with open(path, 'r') as f:
+        for line in f:
+            if line.strip() == 'end_header':
+                break
         data = np.loadtxt(f)
     if data.ndim == 1:
         data = data.reshape(1, -1)
