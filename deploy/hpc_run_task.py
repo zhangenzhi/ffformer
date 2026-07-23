@@ -254,19 +254,25 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
             rep.log(f"Large cloud ({N:,} pts > {WHOLE_MAX:,}); tiling {nx}x{ny} "
                     f"({tile_size}m, overlap={overlap}m)")
 
+            # Separable masking: precompute per-column band masks once (nx + ny
+            # full scans instead of nx*ny), on contiguous columns — the strided
+            # xyz[:, k] view is cache-hostile at hundreds of millions of points.
+            xs = np.ascontiguousarray(xyz[:, 0])
+            ys = np.ascontiguousarray(xyz[:, 1])
+            ymasks = [((ys >= ymin + iy * tile_size - overlap) &
+                       (ys <= ymin + (iy + 1) * tile_size + overlap))
+                      for iy in range(ny)]
             tiles = []
             for ix in range(nx):
+                xmask = ((xs >= xmin + ix * tile_size - overlap) &
+                         (xs <= xmin + (ix + 1) * tile_size + overlap))
                 for iy in range(ny):
-                    tx0 = xmin + ix * tile_size - overlap
-                    tx1 = xmin + (ix + 1) * tile_size + overlap
-                    ty0 = ymin + iy * tile_size - overlap
-                    ty1 = ymin + (iy + 1) * tile_size + overlap
-                    mask = ((xyz[:, 0] >= tx0) & (xyz[:, 0] <= tx1) &
-                            (xyz[:, 1] >= ty0) & (xyz[:, 1] <= ty1))
+                    mask = xmask & ymasks[iy]
                     n_pts = int(mask.sum())
                     if n_pts < 100:
                         continue
                     tiles.append({'global_idx': np.where(mask)[0], 'n_points': n_pts})
+            del xs, ys, ymasks, xmask
 
             n_tiles = len(tiles)
             rep.log(f"{n_tiles} non-empty tiles")
