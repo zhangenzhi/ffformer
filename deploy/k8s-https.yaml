@@ -1,0 +1,165 @@
+# HTTPS/TLS termination for ffformer public endpoint.
+#
+# A dedicated nginx (unprivileged) deployment terminates TLS on 8443 and
+# proxies plain HTTP to the inference pod. The inference deployment is left
+# untouched (its health probes stay plain HTTP). To roll back to plain HTTP,
+# repoint the ffformer-public Service selector/targetPort back to the infer
+# pod on 8000 (see the commented block at the bottom).
+#
+# The TLS Secret (ffformer-tls) is created out-of-band from a self-signed
+# cert; it is NOT committed here. Recreate/replace it with:
+#   kubectl create secret tls ffformer-tls --cert=tls.crt --key=tls.key \
+#     -n c30636-default --dry-run=client -o yaml | kubectl apply -f -
+# Swapping in an official cert later = replace this Secret + rollout restart.
+---
+# Stable backend Service pointing at the live inference pod, for nginx to proxy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ffformer-http
+  namespace: c30636-default
+  labels:
+    app: ffformer-infer
+spec:
+  type: ClusterIP
+  selector:
+    workload.user.cattle.io/workloadselector: apps.deployment-c30636-default-ffformer-infer-base
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ffformer-nginx-tls
+  namespace: c30636-default
+data:
+  default.conf: |
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    server {
+        listen 8443 ssl;
+        http2 on;
+        server_name j-peaks-forestformer3d.hucc.hokudai.ac.jp;
+
+        ssl_certificate     /etc/nginx/tls/tls.crt;
+        ssl_certificate_key /etc/nginx/tls/tls.key;
+        ssl_protocols       TLSv1.2 TLSv1.3;
+        ssl_ciphers         HIGH:!aNULL:!MD5;
+
+        # Point-cloud uploads are large (multi-GB); do not cap or buffer them.
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        proxy_buffering off;
+
+        location / {
+            proxy_pass http://ffformer-http:8000;
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Upgrade           $http_upgrade;
+            proxy_set_header Connection        $connection_upgrade;
+            # Inference/polling can hold a request open for a long time.
+            proxy_connect_timeout 60s;
+            proxy_read_timeout    3600s;
+            proxy_send_timeout    3600s;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ffformer-tls
+  namespace: c30636-default
+  labels:
+    app: ffformer-tls
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ffformer-tls
+  template:
+    metadata:
+      labels:
+        app: ffformer-tls
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:stable-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+              name: https
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8443
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+      volumes:
+        - name: conf
+          configMap:
+            name: ffformer-nginx-tls
+        - name: tls
+          secret:
+            secretName: ffformer-tls
+---
+# Public LoadBalancer now points at the TLS proxy instead of the raw app.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ffformer-public
+  namespace: c30636-default
+  labels:
+    app: ffformer-infer
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.31.229.16"
+spec:
+  type: LoadBalancer
+  selector:
+    app: ffformer-tls
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP
+# ---- ROLLBACK: to revert to plain HTTP, apply this instead ----
+#   selector:
+#     workload.user.cattle.io/workloadselector: apps.deployment-c30636-default-ffformer-infer-base
+#   ports:
+#     - name: https
+#       port: 443
+#       targetPort: 8000
