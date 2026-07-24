@@ -1,30 +1,55 @@
-"""Transformer query decoder with iterative mask prediction."""
+"""Transformer query decoder with iterative mask prediction.
+
+Batched/padded implementation: the per-sample Python loops are replaced by
+padded batched attention so K sliding-window regions run in one forward pass
+(fills the GPU instead of many tiny batch-1 calls). The public interface is
+unchanged — forward(x_list, queries_list) still takes/returns per-sample lists;
+padding + masking are internal and numerically equivalent to per-sample calls.
+"""
 import torch
 import torch.nn as nn
+
+
+def _pad_stack(tensors):
+    """List[(L_i, D)] -> (B, Lmax, D), pad_mask (B, Lmax) bool (True=pad), lengths."""
+    B = len(tensors)
+    lengths = [int(t.shape[0]) for t in tensors]
+    Lmax = max(lengths) if lengths else 0
+    out = tensors[0].new_zeros((B, Lmax, tensors[0].shape[-1]))
+    pad = torch.ones((B, Lmax), dtype=torch.bool, device=tensors[0].device)
+    for i, t in enumerate(tensors):
+        L = lengths[i]
+        if L:
+            out[i, :L] = t
+            pad[i, :L] = False
+    return out, pad, lengths
 
 
 class CrossAttentionLayer(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.0, fix=False):
         super().__init__()
         self.fix = fix
+        self.num_heads = num_heads
         self.attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, sources, queries, attn_masks=None):
-        """sources: List[(M_i, D)], queries: List[(Q_i, D)], attn_masks: List[(Q_i, M_i)]."""
-        outputs = []
-        for i in range(len(sources)):
-            k = v = sources[i]
-            mask = attn_masks[i] if attn_masks is not None else None
-            out, _ = self.attn(queries[i], k, v, attn_mask=mask)
-            if self.fix:
-                out = self.dropout(out)
-            out = out + queries[i]
-            if self.fix:
-                out = self.norm(out)
-            outputs.append(out)
-        return outputs
+    def forward(self, sources, src_pad, queries, attn_mask=None):
+        """sources (B,M,D); src_pad (B,M) True=pad; queries (B,Q,D);
+        attn_mask (B,Q,M) bool True=block (source padding already folded in)."""
+        if attn_mask is not None:
+            B, Q, M = attn_mask.shape
+            am = attn_mask.unsqueeze(1).expand(B, self.num_heads, Q, M).reshape(
+                B * self.num_heads, Q, M)
+            out, _ = self.attn(queries, sources, sources, attn_mask=am)
+        else:
+            out, _ = self.attn(queries, sources, sources, key_padding_mask=src_pad)
+        if self.fix:
+            out = self.dropout(out)
+        out = out + queries
+        if self.fix:
+            out = self.norm(out)
+        return out
 
 
 class SelfAttentionLayer(nn.Module):
@@ -34,14 +59,12 @@ class SelfAttentionLayer(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        out = []
-        for y in x:
-            z, _ = self.attn(y, y, y)
-            z = self.dropout(z) + y
-            z = self.norm(z)
-            out.append(z)
-        return out
+    def forward(self, x, qry_pad):
+        """x (B,Q,D); qry_pad (B,Q) True=pad (masked as keys)."""
+        z, _ = self.attn(x, x, x, key_padding_mask=qry_pad)
+        z = self.dropout(z) + x
+        z = self.norm(z)
+        return z
 
 
 class FFN(nn.Module):
@@ -54,7 +77,8 @@ class FFN(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
-        return [self.norm(self.net(y) + y) for y in x]
+        """x (B,Q,D)."""
+        return self.norm(self.net(x) + x)
 
 
 class QueryDecoder(nn.Module):
@@ -96,7 +120,7 @@ class QueryDecoder(nn.Module):
         self.ffn_layers = nn.ModuleList([
             FFN(d_model, hidden_dim, dropout, activation) for _ in range(num_layers)])
 
-        # Output heads (out_cls is NOT used in this model variant — commented out in original)
+        # Output heads (out_cls is NOT used in this model variant)
         self.out_norm = nn.LayerNorm(d_model)
         if objectness_flag:
             self.out_score = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 1))
@@ -104,80 +128,96 @@ class QueryDecoder(nn.Module):
     def _get_queries(self, instance_queries, batch_size):
         """Combine instance queries with learnable semantic queries, then project.
 
-        Instance queries (Q, in_channels=32) + semantic queries (S, in_channels=32)
-        → concat → query_proj → (Q+S, d_model=256)
+        Instance queries (Q, in_channels) + semantic queries (S, in_channels)
+        → concat → query_proj → (Q+S, d_model). Returns a per-sample list.
         """
-        # Find device from first non-empty query
         device = None
         for q in instance_queries:
             if len(q) > 0:
                 device = q.device
                 break
+        if device is None:
+            device = self.semantic_queries.weight.device
 
         result = []
         for i in range(batch_size):
             sem_q = self.semantic_queries.weight.to(device)  # (S, in_channels)
-            inst_q = instance_queries[i]  # (Q, in_channels)
+            inst_q = instance_queries[i]
             if len(inst_q) == 0:
                 inst_q = torch.empty(0, sem_q.shape[1], device=device)
             concat = torch.cat([inst_q, sem_q], dim=0)  # (Q+S, in_channels)
-            result.append(self.query_proj(concat))  # (Q+S, d_model)
+            result.append(self.query_proj(concat))       # (Q+S, d_model)
         return result
 
-    def _forward_head(self, queries, mask_feats):
-        """Predict masks, scores, and generate attention masks."""
-        pred_scores, pred_masks, attn_masks = [], [], []
-        for i in range(len(queries)):
-            norm_q = self.out_norm(queries[i])
-            pred_scores.append(self.out_score(norm_q) if self.objectness_flag else None)
+    def _forward_head(self, queries, mask_feats, src_pad, qry_pad):
+        """Batched mask/score/attn-mask prediction.
 
-            # Mask prediction: dot product between queries and voxel features
-            pred_mask = torch.einsum('qd,md->qm', norm_q, mask_feats[i])
+        queries (B,Q,D), mask_feats (B,M,D), src_pad (B,M), qry_pad (B,Q).
+        Returns pred_scores (B,Q,1) | None, pred_masks (B,Q,M), attn_masks (B,Q,M) | None.
+        """
+        norm_q = self.out_norm(queries)                              # (B,Q,D)
+        pred_scores = self.out_score(norm_q) if self.objectness_flag else None
+        pred_masks = torch.einsum('bqd,bmd->bqm', norm_q, mask_feats)  # (B,Q,M)
 
-            if self.attn_mask:
-                amask = (pred_mask.sigmoid() < 0.5).bool()
-                # Reset rows that are fully masked (attend to nothing)
-                amask[amask.sum(-1) == amask.shape[-1]] = False
-                attn_masks.append(amask.detach())
+        attn_masks = None
+        if self.attn_mask:
+            amask = (pred_masks.sigmoid() < 0.5)                     # True=block
+            amask = amask | src_pad.unsqueeze(1)                     # never attend padded sources
+            real = (~src_pad)                                        # (B,M) real keys
+            n_real = real.sum(-1, keepdim=True)                     # (B,1)
+            blocked_real = (amask & real.unsqueeze(1)).sum(-1)       # (B,Q)
+            full = blocked_real >= n_real                           # rows blocking all real keys
+            amask = amask & ~(full.unsqueeze(-1) & real.unsqueeze(1))  # unblock real for those
+            amask = amask & ~qry_pad.unsqueeze(-1)                   # padded queries attend all (no NaN)
+            attn_masks = amask.detach()
 
-            pred_masks.append(pred_mask)
-
-        return pred_scores, pred_masks, attn_masks if self.attn_mask else None
+        return pred_scores, pred_masks, attn_masks
 
     def forward(self, x, instance_queries):
         """Forward pass with iterative mask prediction.
 
         Args:
             x: List[(M_i, C)] backbone features per sample.
-            instance_queries: List[(Q_i, C)] query features from ISA/grid selection.
+            instance_queries: List[(Q_i, C)] query features per sample.
 
         Returns:
-            Dict with 'cls_preds', 'masks', 'scores', 'aux_outputs'.
+            Dict with 'masks' (per-sample list of (Q_i+S, M_i)), 'scores'
+            (per-sample list of (Q_i+S, 1)), and 'aux_outputs'.
         """
-        inst_feats = [self.input_proj(y) for y in x]
-        mask_feats = [self.x_mask(y) for y in x]
-        queries = self._get_queries(instance_queries, len(x))
+        B = len(x)
+        inst_feats_l = [self.input_proj(y) for y in x]
+        mask_feats_l = [self.x_mask(y) for y in x]
+        queries_l = self._get_queries(instance_queries, B)
 
-        # Initial prediction
+        inst_feats, src_pad, src_len = _pad_stack(inst_feats_l)   # (B,M,D)
+        mask_feats, _, _ = _pad_stack(mask_feats_l)               # (B,M,D)
+        queries, qry_pad, qry_len = _pad_stack(queries_l)         # (B,Q,D)
+
+        def _unpad(masks_bt, scores_bt):
+            m = [masks_bt[i, :qry_len[i], :src_len[i]] for i in range(B)]
+            if scores_bt is None:
+                s = [None] * B
+            else:
+                s = [scores_bt[i, :qry_len[i]] for i in range(B)]
+            return m, s
+
         scores_all, masks_all = [], []
-        pred_score, pred_mask, attn_mask = self._forward_head(queries, mask_feats)
+        pred_score, pred_mask, attn_mask = self._forward_head(queries, mask_feats, src_pad, qry_pad)
         scores_all.append(pred_score)
         masks_all.append(pred_mask)
 
-        # Iterative refinement
         for i in range(len(self.cross_attn_layers)):
-            queries = self.cross_attn_layers[i](inst_feats, queries, attn_mask)
-            queries = self.self_attn_layers[i](queries)
+            queries = self.cross_attn_layers[i](inst_feats, src_pad, queries, attn_mask)
+            queries = self.self_attn_layers[i](queries, qry_pad)
             queries = self.ffn_layers[i](queries)
-            pred_score, pred_mask, attn_mask = self._forward_head(queries, mask_feats)
+            pred_score, pred_mask, attn_mask = self._forward_head(queries, mask_feats, src_pad, qry_pad)
             scores_all.append(pred_score)
             masks_all.append(pred_mask)
 
-        aux_outputs = [
-            {'masks': m, 'scores': s}
-            for s, m in zip(scores_all[:-1], masks_all[:-1])]
+        final_masks, final_scores = _unpad(masks_all[-1], scores_all[-1])
+        aux_outputs = []
+        for j in range(len(masks_all) - 1):
+            m, s = _unpad(masks_all[j], scores_all[j])
+            aux_outputs.append({'masks': m, 'scores': s})
 
-        return dict(
-            masks=masks_all[-1],
-            scores=scores_all[-1],
-            aux_outputs=aux_outputs)
+        return dict(masks=final_masks, scores=final_scores, aux_outputs=aux_outputs)
