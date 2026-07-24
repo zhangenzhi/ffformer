@@ -177,10 +177,12 @@ class ForestFormer3D(nn.Module):
         # Generate sliding window regions
         regions = self._generate_regions(points, self.radius, step_size)
 
-        # Global accumulators
-        votes_counter = np.zeros((N, self.num_classes), dtype=np.int16)
-        all_pre_ins = np.full(N, -1, dtype=np.int64)
-        global_instance_scores = np.zeros(N, dtype=np.float64)
+        # Global accumulators — kept on the GPU so per-region voting/merge never
+        # round-trips to the CPU (the .cpu().numpy() + np.add.at path forced a
+        # sync every region). Converted back to numpy once at the end.
+        votes_counter = torch.zeros((N, self.num_classes), dtype=torch.int32, device=device)
+        all_pre_ins = torch.full((N,), -1, dtype=torch.int64, device=device)
+        global_instance_scores = torch.zeros(N, dtype=torch.float64, device=device)
         best_masks = []
         max_instance = 0
 
@@ -286,13 +288,10 @@ class ForestFormer3D(nn.Module):
                     if _prof:
                         _t = _lap('3_post', _t)
                 else:
-                    # No trees: just vote semantic labels
+                    # No trees: just vote semantic labels (GPU)
                     proj_logits = bi_semantic_logits[inverse_mapping2]
-                    sem_pred = torch.argmax(proj_logits, dim=1)
-                    cyl_sem = sem_pred[nn_idx_pc1]
-                    ids_np = torch.where(region_mask)[0].cpu().numpy()
-                    sem_np = cyl_sem.cpu().numpy().astype(int)
-                    np.add.at(votes_counter, (ids_np, sem_np), 1)
+                    cyl_sem = torch.argmax(proj_logits, dim=1)[nn_idx_pc1]
+                    self._vote(votes_counter, region_mask, cyl_sem)
 
             del pc1, pc1_indices, pc2, pc2_indices, pc3, pc3_indices
             del embed_logits, bi_semantic_logits
@@ -307,9 +306,11 @@ class ForestFormer3D(nn.Module):
             for k in sorted(_acc):
                 print(f'[PROFILE]   {k:<10s} {_acc[k]:6.1f}s  {100*_acc[k]/tot:4.0f}%', flush=True)
 
-        # Global post-processing
-        final_semantic = votes_counter.argmax(1)
-        final_semantic[votes_counter.sum(1) == 0] = -1
+        # Global post-processing — bring the GPU accumulators back to numpy once.
+        votes_np = votes_counter.cpu().numpy()
+        final_semantic = votes_np.argmax(1)
+        final_semantic[votes_np.sum(1) == 0] = -1
+        all_pre_ins = all_pre_ins.cpu().numpy()
         all_pre_ins[final_semantic == 0] = -1  # ground → no instance
 
         # Remove small instances
@@ -455,11 +456,10 @@ class ForestFormer3D(nn.Module):
                         votes_counter, p['region_mask'])
                     max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
                 else:
-                    # No trees: semantic voting only
+                    # No trees: semantic voting only (GPU)
                     proj_logits = p['bi_logits'][p['inv']]
                     cyl_sem = torch.argmax(proj_logits, dim=1)[p['nn_idx_pc1']]
-                    ids_np = torch.where(p['region_mask'])[0].cpu().numpy()
-                    np.add.at(votes_counter, (ids_np, cyl_sem.cpu().numpy().astype(int)), 1)
+                    self._vote(votes_counter, p['region_mask'], cyl_sem)
 
             done += len(prepped)
             torch.cuda.empty_cache()
@@ -534,16 +534,29 @@ class ForestFormer3D(nn.Module):
         keep = (scores > 0) & (mask_pred.sum(1) > 10)
         return mask_pred[keep], scores[keep], sem_res
 
+    @staticmethod
+    def _vote(votes_counter, region_mask, sem_per_point):
+        """GPU semantic vote: votes_counter[global_idx, class] += 1.
+
+        Integer atomic add via index_put_(accumulate=True) — exactly equivalent
+        to np.add.at, but stays on device (no .cpu().numpy() round-trip).
+        """
+        ids = torch.where(region_mask)[0]
+        ones = torch.ones(ids.shape[0], dtype=votes_counter.dtype, device=votes_counter.device)
+        votes_counter.index_put_((ids, sem_per_point.long()), ones, accumulate=True)
+
     def _process_cylinder_results(self, masks, scores, sem_res, pc1, pc3,
                                    pc1_indices, nn_idx_pc1, region, score_th,
                                    all_pre_ins, global_instance_scores,
                                    best_masks, max_instance, votes_counter, region_mask):
-        """Process per-cylinder predictions: edge filter, score merge, vote."""
+        """Process per-cylinder predictions: edge filter, score merge, vote.
+
+        Accumulators (votes_counter / all_pre_ins / global_instance_scores) are
+        GPU tensors; everything stays on device except one small transfer per
+        region to build best_masks. Numerically identical to the numpy path.
+        """
         if masks is None or len(masks) == 0:
-            # Semantic voting only
-            ids_np = torch.where(region_mask)[0].cpu().numpy()
-            sem_np = sem_res[nn_idx_pc1].cpu().numpy().astype(int)
-            np.add.at(votes_counter, (ids_np, sem_np), 1)
+            self._vote(votes_counter, region_mask, sem_res[nn_idx_pc1])
             return
 
         valid_scores = scores > score_th
@@ -584,23 +597,28 @@ class ForestFormer3D(nn.Module):
             improved = score_per_hit == best_score[cols]
             best_mid.index_put_((cols[improved],), rows[improved], accumulate=False)
 
-            pts_glob = pc1_indices.cpu().numpy()
-            new_scores = best_score.cpu().numpy()
-            better = new_scores > global_instance_scores[pts_glob]
+            # Score-priority global update — entirely on GPU (was numpy indexing
+            # with a .cpu() of best_score/best_mid every region).
+            better = best_score > global_instance_scores[pc1_indices]  # (N1,) bool
+            if bool(better.any()):     # one sync per region (vs many before)
+                gi = pc1_indices[better]
+                global_instance_scores[gi] = best_score[better].double()
+                all_pre_ins[gi] = max_instance + best_mid[better]
 
-            if better.any():
-                global_instance_scores[pts_glob[better]] = new_scores[better]
-                all_pre_ins[pts_glob[better]] = max_instance + best_mid.cpu().numpy()[better]
-                for mid in np.unique(best_mid.cpu().numpy()[better]):
-                    sel_pts = cols[rows == mid].cpu().numpy()
+                # best_masks feeds the final CPU merge. Transfer rows/cols once
+                # (not cols[rows==mid].cpu() per instance) and group in numpy.
+                winning = torch.unique(best_mid[better]).cpu().numpy()
+                rows_c = rows.cpu().numpy()
+                cols_c = cols.cpu().numpy()
+                pts_glob = pc1_indices.cpu().numpy()
+                scores_kept_c = scores_kept.cpu().numpy()
+                for mid in winning:
+                    sel_pts = cols_c[rows_c == mid]
                     best_masks.append((pts_glob[sel_pts], max_instance + int(mid),
-                                       float(scores_kept[int(mid)])))
+                                       float(scores_kept_c[int(mid)])))
 
-        # Semantic voting
-        cyl_sem = sem_res[nn_idx_pc1]
-        ids_np = torch.where(region_mask)[0].cpu().numpy()
-        sem_np = cyl_sem.cpu().numpy().astype(int)
-        np.add.at(votes_counter, (ids_np, sem_np), 1)
+        # Semantic voting (GPU)
+        self._vote(votes_counter, region_mask, sem_res[nn_idx_pc1])
 
     @staticmethod
     def _merge_instances(all_pre_ins, best_masks, overlap_threshold=0.3):
