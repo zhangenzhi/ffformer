@@ -147,7 +147,7 @@ class ForestFormer3D(nn.Module):
 
     @torch.no_grad()
     def predict(self, points, output_path=None, pts_semantic_gt=None, pts_instance_gt=None,
-                progress_cb=None, use_amp=True):
+                progress_cb=None, use_amp=None):
         """Full-scene inference with sliding window.
 
         Args:
@@ -160,6 +160,8 @@ class ForestFormer3D(nn.Module):
             dict with 'semantic_pred', 'instance_pred', 'instance_scores'.
         """
         self.eval()
+        if use_amp is None:
+            use_amp = os.environ.get('FF_USE_AMP', '1') not in ('0', 'false', 'False')
         device = points.device
         N = points.shape[0]
 
@@ -515,16 +517,18 @@ class ForestFormer3D(nn.Module):
         ground_ratio = (mask_pred.float() @ is_stuff) / mask_pred.sum(1).clamp(min=1)
         scores[ground_ratio > 0.5] = 0
 
-        # Filter by z values (same as original)
+        # Filter by z (vectorized). The original looped per mask with
+        # z_vals.min().item(), forcing a GPU->CPU sync per instance that stalled
+        # the device. Math is identical: kill a mask with no points, or whose
+        # lowest point sits >5 m above the tallest ground point.
         ground_pts = coordinates[sem_res == 0]
         ground_z_max = ground_pts[:, 2].max().item() if ground_pts.size(0) > 0 else float('inf')
-        for i in range(mask_pred.size(0)):
-            if mask_pred[i].sum() == 0:
-                scores[i] = 0
-                continue
-            z_vals = coordinates[mask_pred[i], 2]
-            if z_vals.numel() > 0 and z_vals.min().item() > ground_z_max + 5:
-                scores[i] = 0
+        if mask_pred.shape[0] > 0:
+            z = coordinates[:, 2]  # (N_raw,)
+            min_z = torch.where(mask_pred, z.unsqueeze(0),
+                                z.new_full((1,), float('inf'))).min(dim=1).values  # (K,)
+            counts = mask_pred.sum(1)
+            scores.masked_fill_((counts == 0) | (min_z > ground_z_max + 5), 0)
 
         # Keep valid
         keep = (scores > 0) & (mask_pred.sum(1) > 10)
@@ -546,13 +550,12 @@ class ForestFormer3D(nn.Module):
         edge_threshold = self.radius - 0.5
         pc3_dist = torch.sqrt((pc3[:, 0] - region[0]) ** 2 + (pc3[:, 1] - region[1]) ** 2)
 
-        valid_edge = np.ones(len(masks), dtype=bool)
-        for i in range(len(masks)):
-            if valid_scores[i] and torch.any(pc3_dist[masks[i]] > edge_threshold):
-                valid_edge[i] = False
-
-        keep = torch.where(
-            torch.tensor(valid_scores.cpu().numpy() & valid_edge, device=pc3.device))[0]
+        # Vectorized edge filter. The original looped per mask with torch.any(),
+        # a GPU->CPU sync each. keep[i] = valid_scores[i] AND no masked point lies
+        # beyond the cylinder edge — algebraically identical to the loop.
+        far = pc3_dist > edge_threshold  # (M3,)
+        has_far = (masks & far.unsqueeze(0)).any(dim=1)  # (K,)
+        keep = torch.where(valid_scores & ~has_far)[0]
 
         if keep.numel():
             masks_kept = masks[keep]
