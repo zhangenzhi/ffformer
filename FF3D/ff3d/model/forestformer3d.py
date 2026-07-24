@@ -182,6 +182,16 @@ class ForestFormer3D(nn.Module):
         best_masks = []
         max_instance = 0
 
+        # Region batching: process FF_REGION_BATCH sliding windows per forward
+        # pass (batched backbone + vectorized decoder) to fill the GPU. Default
+        # 1 = the original one-region-at-a-time path below (unchanged).
+        region_batch = int(os.environ.get('FF_REGION_BATCH', 1))
+        if region_batch > 1:
+            max_instance = self._infer_batched(
+                points, regions, region_batch, grid_size, num_points, score_th1,
+                use_amp, progress_cb, votes_counter, all_pre_ins,
+                global_instance_scores, best_masks)
+
         from tqdm import tqdm
         _prof = bool(os.environ.get('FF_PROFILE'))
         _acc = {}
@@ -192,7 +202,8 @@ class ForestFormer3D(nn.Module):
             _acc[key] = _acc.get(key, 0.0) + (now - t0)
             return now
 
-        for region_idx, region in enumerate(tqdm(regions, desc="Inference")):
+        seq_regions = regions if region_batch == 1 else []
+        for region_idx, region in enumerate(tqdm(seq_regions, desc="Inference")):
             _t = time.time() if _prof else None
             # ① Cylinder crop
             region_mask = ((points[:, 0] - region[0]) ** 2 +
@@ -344,7 +355,118 @@ class ForestFormer3D(nn.Module):
             x += step_size
         return regions
 
-    def _predict_by_feat(self, out, superpoints, coordinates, query_indices):
+    def _infer_batched(self, points, regions, region_batch, grid_size, num_points,
+                       score_th1, use_amp, progress_cb, votes_counter, all_pre_ins,
+                       global_instance_scores, best_masks):
+        """Batched sliding-window inference: FF_REGION_BATCH regions per forward.
+
+        Mutates votes_counter / all_pre_ins / global_instance_scores / best_masks
+        in place; returns the final max_instance. Numerically this mirrors the
+        per-region path — regions are still post-processed sequentially (so the
+        score-priority merge order is identical); only the GPU forward (backbone
+        + decoder) is batched to fill the device.
+        """
+        from tqdm import tqdm
+        max_instance = 0
+        n_reg = len(regions)
+        done = 0
+
+        for start in tqdm(range(0, n_reg, region_batch), desc="Inference(batched)"):
+            batch = regions[start:start + region_batch]
+
+            # ── Phase 1: per-region prep (crop, voxelize, sample, collate) ──
+            prepped = []
+            for region in batch:
+                region_mask = ((points[:, 0] - region[0]) ** 2 +
+                               (points[:, 1] - region[1]) ** 2) <= self.radius ** 2
+                pc1 = points[region_mask]
+                if len(pc1) == 0:
+                    done += 1
+                    continue
+                pc1_indices = torch.where(region_mask)[0]
+                pc2, pc2_indices, grid_inverse = grid_sample(pc1, pc1_indices, grid_size)
+                if len(pc2) <= num_points:
+                    pc3, nn_idx_pc1 = pc2, grid_inverse
+                else:
+                    choices = np.random.choice(len(pc2), num_points, replace=False)
+                    pc3, nn_idx_pc1 = pc2[choices], None
+                coords, feats, inv, spatial = self.collate([pc3])
+                prepped.append(dict(region=region, region_mask=region_mask, pc1=pc1,
+                                    pc1_indices=pc1_indices, pc3=pc3, nn_idx_pc1=nn_idx_pc1,
+                                    coords=coords, feats=feats, inv=inv, spatial=spatial))
+
+            if not prepped:
+                if progress_cb is not None:
+                    progress_cb(done, n_reg)
+                continue
+
+            with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+                # ── Phase 2: one batched backbone forward for the whole group ──
+                K = len(prepped)
+                coords_list = []
+                for b, p in enumerate(prepped):
+                    c = p['coords'].clone()
+                    c[:, 0] = b                       # set batch index
+                    coords_list.append(c)
+                coords_cat = torch.cat(coords_list, dim=0)
+                feats_cat = torch.cat([p['feats'] for p in prepped], dim=0)
+                spatial = torch.stack([p['spatial'] for p in prepped]).max(0)[0]
+                x_sparse = spconv.SparseConvTensor(feats_cat, coords_cat, spatial, K)
+                x_list = self.extract_feat(x_sparse)   # list of K, aligned per batch idx
+
+                # ── Phase 3: per-region heads + query selection ──
+                x_for_dec, queries_for_dec = [], []
+                for b, p in enumerate(prepped):
+                    xb = x_list[b]
+                    bi_logits = self.BiSemantic(xb)
+                    p['bi_logits'] = bi_logits
+                    tree_idx = torch.where(torch.argmax(bi_logits, dim=1) == 1)[0]
+                    if p['nn_idx_pc1'] is None:      # cdist fallback for subsampled tiles
+                        parts = []
+                        for ss in range(0, p['pc1'].shape[0], self.chunk):
+                            ee = min(ss + self.chunk, p['pc1'].shape[0])
+                            parts.append(torch.cdist(p['pc1'][ss:ee].float(),
+                                                     p['pc3'].float()).argmin(1))
+                        p['nn_idx_pc1'] = torch.cat(parts)
+                    if tree_idx.numel() > 1:
+                        sel_local = grid_subsample_queries(p['pc3'][tree_idx], self.query_point_num)
+                        p['selected'] = tree_idx[sel_local]
+                        p['dec_j'] = len(x_for_dec)
+                        x_for_dec.append(xb)
+                        queries_for_dec.append(xb[p['selected']])
+                    else:
+                        p['dec_j'] = None
+
+                # ── Phase 4: one batched decoder forward for the tree regions ──
+                x_dec = self.decoder(x_for_dec, queries_for_dec) if x_for_dec else None
+
+            # ── Phase 5: per-region post-process (sequential, score-priority) ──
+            for b, p in enumerate(prepped):
+                if p['dec_j'] is not None:
+                    masks, scores, sem_res = self._predict_by_feat(
+                        x_dec, p['inv'], p['pc3'], p['selected'], idx=p['dec_j'])
+                    scores = scores.float()
+                    self._process_cylinder_results(
+                        masks, scores, sem_res, p['pc1'], p['pc3'], p['pc1_indices'],
+                        p['nn_idx_pc1'], p['region'], score_th1, all_pre_ins,
+                        global_instance_scores, best_masks, max_instance,
+                        votes_counter, p['region_mask'])
+                    max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
+                else:
+                    # No trees: semantic voting only
+                    proj_logits = p['bi_logits'][p['inv']]
+                    cyl_sem = torch.argmax(proj_logits, dim=1)[p['nn_idx_pc1']]
+                    ids_np = torch.where(p['region_mask'])[0].cpu().numpy()
+                    np.add.at(votes_counter, (ids_np, cyl_sem.cpu().numpy().astype(int)), 1)
+
+            done += len(prepped)
+            torch.cuda.empty_cache()
+            if progress_cb is not None:
+                progress_cb(done, n_reg)
+
+        return max_instance
+
+    def _predict_by_feat(self, out, superpoints, coordinates, query_indices, idx=0):
         """Extract instance masks + scores + semantic from decoder output.
 
         Returns:
@@ -352,8 +474,8 @@ class ForestFormer3D(nn.Module):
             scores: (K,) confidence scores.
             sem_res: (N_raw,) semantic labels in raw point space (0/1/2).
         """
-        pred_masks = out['masks'][0]  # (Q+S, M_voxel)
-        pred_scores = out['scores'][0]  # (Q+S, 1)
+        pred_masks = out['masks'][idx]  # (Q+S, M_voxel)
+        pred_scores = out['scores'][idx]  # (Q+S, 1)
         n_sem = self.num_classes
 
         # Semantic: argmax of last 3 (semantic query) masks, mapped to raw points via superpoints
