@@ -163,7 +163,10 @@ class ForestFormer3D(nn.Module):
         device = points.device
         N = points.shape[0]
 
-        step_size = self.radius / 4
+        # Sliding-window step = radius / FF_STEP_DIV. Smaller divisor = larger
+        # stride = fewer, bigger regions (fewer decoder calls, higher GPU util),
+        # at the cost of thinner vote overlap. Default 4 matches training.
+        step_size = self.radius / float(os.environ.get('FF_STEP_DIV', 4))
         grid_size = 0.2
         num_points = 640000
         score_th1 = self.score_th
@@ -180,7 +183,17 @@ class ForestFormer3D(nn.Module):
         max_instance = 0
 
         from tqdm import tqdm
+        _prof = bool(os.environ.get('FF_PROFILE'))
+        _acc = {}
+
+        def _lap(key, t0):
+            torch.cuda.synchronize()
+            now = time.time()
+            _acc[key] = _acc.get(key, 0.0) + (now - t0)
+            return now
+
         for region_idx, region in enumerate(tqdm(regions, desc="Inference")):
+            _t = time.time() if _prof else None
             # ① Cylinder crop
             region_mask = ((points[:, 0] - region[0]) ** 2 +
                            (points[:, 1] - region[1]) ** 2) <= self.radius ** 2
@@ -205,6 +218,8 @@ class ForestFormer3D(nn.Module):
             # ④ Collate → sparse tensor
             coordinates, features, inverse_mapping2, spatial_shape = self.collate([pc3])
             x_sparse = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
+            if _prof:
+                _t = _lap('1_prep', _t)
 
             # ⑤–⑪ Neural forward in mixed precision (fp16 on CUDA). autocast only
             # affects float matmul/conv; int/index ops and numpy accumulation are
@@ -218,6 +233,8 @@ class ForestFormer3D(nn.Module):
                 bi_semantic_logits = self.BiSemantic(x[0])
                 semantic_predictions_bi = torch.argmax(bi_semantic_logits, dim=1)
                 tree_indices = torch.where(semantic_predictions_bi == 1)[0]
+                if _prof:
+                    _t = _lap('2a_backbone', _t)
 
                 # ⑦ NN mapping (optimized: grid inverse or cdist fallback)
                 if nn_idx_pc1 is None:
@@ -244,6 +261,8 @@ class ForestFormer3D(nn.Module):
                     # scores back to fp32 for stable thresholding / accumulation.
                     # NOTE: masks stays as-is — it is used as a boolean index.
                     scores = scores.float()
+                    if _prof:
+                        _t = _lap('2b_decode', _t)
 
                     # ⑪ Post-process: score filter + edge filter + merge
                     self._process_cylinder_results(
@@ -251,6 +270,8 @@ class ForestFormer3D(nn.Module):
                         region, score_th1, all_pre_ins, global_instance_scores,
                         best_masks, max_instance, votes_counter, region_mask)
                     max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
+                    if _prof:
+                        _t = _lap('3_post', _t)
                 else:
                     # No trees: just vote semantic labels
                     proj_logits = bi_semantic_logits[inverse_mapping2]
@@ -266,6 +287,12 @@ class ForestFormer3D(nn.Module):
                 torch.cuda.empty_cache()
             if progress_cb is not None:
                 progress_cb(region_idx + 1, len(regions))
+
+        if _prof and _acc:
+            tot = sum(_acc.values())
+            print(f'[PROFILE] {len(regions)} regions, staged sum {tot:.1f}s:', flush=True)
+            for k in sorted(_acc):
+                print(f'[PROFILE]   {k:<10s} {_acc[k]:6.1f}s  {100*_acc[k]/tot:4.0f}%', flush=True)
 
         # Global post-processing
         final_semantic = votes_counter.argmax(1)
