@@ -216,6 +216,8 @@ class ForestFormer3D(nn.Module):
             pc1_indices = torch.where(region_mask)[0]
             if len(pc1) == 0:
                 continue
+            if _prof:
+                _t = _lap('1a_crop', _t)
 
             # ② Grid sample (voxelization)
             pc2, pc2_indices, grid_inverse = grid_sample(pc1, pc1_indices, grid_size)
@@ -229,12 +231,14 @@ class ForestFormer3D(nn.Module):
                 pc3 = pc2[choices]
                 pc3_indices = pc2_indices[choices]
                 nn_idx_pc1 = None  # fallback to cdist below
+            if _prof:
+                _t = _lap('1b_voxel', _t)
 
             # ④ Collate → sparse tensor
             coordinates, features, inverse_mapping2, spatial_shape = self.collate([pc3])
             x_sparse = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
             if _prof:
-                _t = _lap('1_prep', _t)
+                _t = _lap('1c_collate', _t)
 
             # ⑤–⑪ Neural forward in mixed precision (fp16 on CUDA). autocast only
             # affects float matmul/conv; int/index ops and numpy accumulation are
