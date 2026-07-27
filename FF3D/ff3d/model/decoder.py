@@ -8,6 +8,7 @@ padding + masking are internal and numerically equivalent to per-sample calls.
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _pad_stack(tensors):
@@ -36,14 +37,38 @@ class CrossAttentionLayer(nn.Module):
 
     def forward(self, sources, src_pad, queries, attn_mask=None):
         """sources (B,M,D); src_pad (B,M) True=pad; queries (B,Q,D);
-        attn_mask (B,Q,M) bool True=block (source padding already folded in)."""
+        attn_mask (B,Q,M) bool True=block (source padding already folded in).
+
+        Manual attention reusing the MultiheadAttention module's weights, but the
+        mask stays (B,1,Q,M) and broadcasts over heads — avoiding the
+        expand->reshape to (B*H,Q,M) that materialised a large contiguous copy
+        every layer. Numerically equivalent to nn.MultiheadAttention.
+        """
+        mha = self.attn
+        E = mha.embed_dim
+        H = self.num_heads
+        Dh = E // H
+        B, Q, _ = queries.shape
+        M = sources.shape[1]
+
+        w, b = mha.in_proj_weight, mha.in_proj_bias
+        q = F.linear(queries, w[:E], b[:E])            # (B,Q,E)
+        k = F.linear(sources, w[E:2 * E], b[E:2 * E])  # (B,M,E)
+        v = F.linear(sources, w[2 * E:], b[2 * E:])    # (B,M,E)
+        q = q.view(B, Q, H, Dh).transpose(1, 2)        # (B,H,Q,Dh)
+        k = k.view(B, M, H, Dh).transpose(1, 2)
+        v = v.view(B, M, H, Dh).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * (Dh ** -0.5)  # (B,H,Q,M)
         if attn_mask is not None:
-            B, Q, M = attn_mask.shape
-            am = attn_mask.unsqueeze(1).expand(B, self.num_heads, Q, M).reshape(
-                B * self.num_heads, Q, M)
-            out, _ = self.attn(queries, sources, sources, attn_mask=am)
+            scores = scores.masked_fill(attn_mask.unsqueeze(1), float('-inf'))  # (B,1,Q,M)
         else:
-            out, _ = self.attn(queries, sources, sources, key_padding_mask=src_pad)
+            scores = scores.masked_fill(src_pad[:, None, None, :], float('-inf'))  # (B,1,1,M)
+        attn = scores.softmax(dim=-1)
+        out = torch.matmul(attn, v)                    # (B,H,Q,Dh)
+        out = out.transpose(1, 2).reshape(B, Q, E)
+        out = mha.out_proj(out)                        # (B,Q,E)
+
         if self.fix:
             out = self.dropout(out)
         out = out + queries
