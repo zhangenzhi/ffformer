@@ -162,13 +162,24 @@ class ForestFormer3D(nn.Module):
         self.eval()
         if use_amp is None:
             use_amp = os.environ.get('FF_USE_AMP', '1') not in ('0', 'false', 'False')
-        # Optional experiment: run the decoder in native fp16 (params + acts,
-        # autocast disabled) so LayerNorm/softmax are NOT promoted to fp32 —
-        # removes the per-op cast copies. May drift results (fp16 stability).
-        if os.environ.get('FF_FP16_DECODER', '0') not in ('0', 'false', 'False') \
-                and not getattr(self, '_dec_half', False):
-            self.decoder.half()
-            self._dec_half = True
+        # Optional experiments (autocast disabled around the decoder so LN/softmax
+        # run natively, removing cast copies). FF_DECODER_DTYPE=fp16|bf16 sets the
+        # decoder precision (bf16 has fp32's exponent range → no overflow/NaN).
+        # FF_FP16_DECODER=1 is an alias for fp16. FF_COMPILE_DECODER=1 torch.compiles
+        # the whole decoder (inductor fuses mask/softmax/FFN/norms; matmuls stay
+        # cublas).
+        _dt = os.environ.get('FF_DECODER_DTYPE', '')
+        if not _dt and os.environ.get('FF_FP16_DECODER', '0') not in ('0', 'false', 'False'):
+            _dt = 'fp16'
+        if _dt in ('fp16', 'bf16') and getattr(self, '_dec_dtype', None) is None:
+            self._dec_dtype = torch.float16 if _dt == 'fp16' else torch.bfloat16
+            self.decoder.to(self._dec_dtype)
+        if os.environ.get('FF_COMPILE_DECODER', '0') not in ('0', 'false', 'False') \
+                and not getattr(self, '_dec_compiled', False):
+            from .decoder import _ensure_triton_libcuda
+            _ensure_triton_libcuda()
+            self.decoder = torch.compile(self.decoder, dynamic=True)
+            self._dec_compiled = True
         device = points.device
         N = points.shape[0]
 
@@ -356,12 +367,14 @@ class ForestFormer3D(nn.Module):
     # ──────────────────── Inference helpers ────────────────────
 
     def _call_decoder(self, x, queries):
-        """Run the decoder. With FF_FP16_DECODER the decoder params are fp16 and
-        autocast is disabled so LayerNorm/softmax stay fp16 (no fp32 promotion /
-        cast copies); inputs are cast to fp16, outputs returned as-is."""
-        if getattr(self, '_dec_half', False):
+        """Run the decoder. With FF_DECODER_DTYPE (fp16/bf16) the params are that
+        dtype and autocast is disabled so LN/softmax stay native (no fp32-promotion
+        cast copies); inputs are cast to match. FF_COMPILE_DECODER wraps it in
+        torch.compile."""
+        dt = getattr(self, '_dec_dtype', None)
+        if dt is not None:
             with torch.autocast('cuda', enabled=False):
-                return self.decoder([xi.half() for xi in x], [qi.half() for qi in queries])
+                return self.decoder([xi.to(dt) for xi in x], [qi.to(dt) for qi in queries])
         return self.decoder(x, queries)
 
     @staticmethod
