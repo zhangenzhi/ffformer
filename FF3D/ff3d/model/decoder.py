@@ -6,9 +6,53 @@ padded batched attention so K sliding-window regions run in one forward pass
 unchanged — forward(x_list, queries_list) still takes/returns per-sample lists;
 padding + masking are internal and numerically equivalent to per-sample calls.
 """
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def _masked_softmax_eager(scores, mask):
+    """scores (B,H,Q,M), mask (B,1,Q,*) bool True=block -> softmax over M."""
+    return scores.masked_fill(mask, float('-inf')).softmax(dim=-1)
+
+
+_masked_softmax_compiled = None
+
+
+def _ensure_triton_libcuda():
+    """Point Triton at the real driver so torch.compile can JIT. This container's
+    Triton 2.1 finds libcuda only via `ldconfig -p`, which doesn't list the
+    --nv-injected /.singularity.d/libs/libcuda.so.1; monkeypatch its lookup to a
+    tmp dir holding a libcuda.so symlink. No-op if Triton/driver aren't present."""
+    try:
+        import triton.common.build as _tb
+        for cand in ('/.singularity.d/libs/libcuda.so.1',
+                     '/usr/lib/x86_64-linux-gnu/libcuda.so.1'):
+            if os.path.exists(cand):
+                d = '/tmp/_ff_libcuda'
+                os.makedirs(d, exist_ok=True)
+                link = os.path.join(d, 'libcuda.so')
+                if not os.path.exists(link):
+                    os.symlink(cand, link)
+                _tb.libcuda_dirs = lambda: [d]
+                return
+    except Exception:
+        pass
+
+
+def masked_softmax(scores, mask):
+    """Fuse masked_fill + softmax. With FF_FUSED_SOFTMAX, torch.compile lets
+    inductor fold the masked_fill into the softmax reduction (one fewer full
+    read/write of the (B,H,Q,M) score matrix). dynamic=True → compile once for
+    the varying (Q,M) region sizes. Numerically identical to the eager path."""
+    global _masked_softmax_compiled
+    if os.environ.get('FF_FUSED_SOFTMAX', '0') not in ('0', 'false', 'False'):
+        if _masked_softmax_compiled is None:
+            _ensure_triton_libcuda()
+            _masked_softmax_compiled = torch.compile(_masked_softmax_eager, dynamic=True)
+        return _masked_softmax_compiled(scores, mask)
+    return _masked_softmax_eager(scores, mask)
 
 
 def _pad_stack(tensors):
@@ -52,20 +96,25 @@ class CrossAttentionLayer(nn.Module):
         M = sources.shape[1]
 
         w, b = mha.in_proj_weight, mha.in_proj_bias
-        q = F.linear(queries, w[:E], b[:E])            # (B,Q,E)
-        k = F.linear(sources, w[E:2 * E], b[E:2 * E])  # (B,M,E)
-        v = F.linear(sources, w[2 * E:], b[2 * E:])    # (B,M,E)
-        q = q.view(B, Q, H, Dh).transpose(1, 2)        # (B,H,Q,Dh)
-        k = k.view(B, M, H, Dh).transpose(1, 2)
-        v = v.view(B, M, H, Dh).transpose(1, 2)
+        q = F.linear(queries, w[:E], b[:E]).view(B, Q, H, Dh).transpose(1, 2)   # (B,H,Q,Dh)
+        k = F.linear(sources, w[E:2 * E], b[E:2 * E]).view(B, M, H, Dh).transpose(1, 2)
+        v = F.linear(sources, w[2 * E:], b[2 * E:]).view(B, M, H, Dh).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) * (Dh ** -0.5)  # (B,H,Q,M)
-        if attn_mask is not None:
-            scores = scores.masked_fill(attn_mask.unsqueeze(1), float('-inf'))  # (B,1,Q,M)
+        if os.environ.get('FF_SDPA', '0') not in ('0', 'false', 'False'):
+            # Fused attention: scaled_dot_product_attention computes scores+mask+
+            # softmax+AV in one tiled kernel (mem-efficient backend for arbitrary
+            # masks) — no full (B,H,Q,M) score/masked_fill/softmax round-trip.
+            # SDPA bool mask is True=ATTEND (opposite of our True=block); the
+            # (B,1,Q,M) shape broadcasts over heads.
+            if attn_mask is not None:
+                m = (~attn_mask).unsqueeze(1)              # (B,1,Q,M)
+            else:
+                m = (~src_pad)[:, None, None, :]           # (B,1,1,M)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=m)  # (B,H,Q,Dh)
         else:
-            scores = scores.masked_fill(src_pad[:, None, None, :], float('-inf'))  # (B,1,1,M)
-        attn = scores.softmax(dim=-1)
-        out = torch.matmul(attn, v)                    # (B,H,Q,Dh)
+            scores = torch.matmul(q, k.transpose(-2, -1)) * (Dh ** -0.5)  # (B,H,Q,M)
+            m = attn_mask.unsqueeze(1) if attn_mask is not None else src_pad[:, None, None, :]
+            out = torch.matmul(masked_softmax(scores, m), v)  # (B,H,Q,Dh)
         out = out.transpose(1, 2).reshape(B, Q, E)
         out = mha.out_proj(out)                        # (B,Q,E)
 
