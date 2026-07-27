@@ -33,9 +33,18 @@ def cross_forward(self, sources, src_pad, queries, attn_mask=None):
         q = F.linear(queries, w[:E], b[:E]); k = F.linear(sources, w[E:2*E], b[E:2*E]); v = F.linear(sources, w[2*E:], b[2*E:])
         q = q.view(B, Q, H, Dh).transpose(1, 2); k = k.view(B, M, H, Dh).transpose(1, 2); v = v.view(B, M, H, Dh).transpose(1, 2)
     with rf("9b_attn_core"):
-        scores = torch.matmul(q, k.transpose(-2, -1)) * (Dh ** -0.5)
-        scores = scores.masked_fill(attn_mask.unsqueeze(1) if attn_mask is not None else src_pad[:, None, None, :], float('-inf'))
-        out = torch.matmul(scores.softmax(dim=-1), v).transpose(1, 2).reshape(B, Q, E)
+        with rf("9b1_QKt"):
+            scores = torch.matmul(q, k.transpose(-2, -1)) * (Dh ** -0.5)  # (B,H,Q,M)
+        with rf("9b2_mask_apply"):
+            scores = scores.masked_fill(
+                attn_mask.unsqueeze(1) if attn_mask is not None else src_pad[:, None, None, :],
+                float('-inf'))
+        with rf("9b3_softmax"):
+            attn = scores.softmax(dim=-1)
+        with rf("9b4_AV"):
+            out = torch.matmul(attn, v)                                    # (B,H,Q,Dh)
+        with rf("9b5_reshape"):
+            out = out.transpose(1, 2).reshape(B, Q, E)
     with rf("9c_out_proj"):
         out = mha.out_proj(out)
     if self.fix: out = self.dropout(out)
@@ -140,7 +149,9 @@ def main():
         torch.cuda.synchronize()
     ins = out['instance_pred']
     print(f'trees {len(np.unique(ins[ins>=0]))}\n', flush=True)
-    labels = ['9a_qkv_proj','9b_attn_core','9c_out_proj','9_self_attn','9_ffn',
+    labels = ['9a_qkv_proj','9b_attn_core',
+              '9b1_QKt','9b2_mask_apply','9b3_softmax','9b4_AV','9b5_reshape',
+              '9c_out_proj','9_self_attn','9_ffn',
               '9d_mask_logits','9e_sigmoid_thresh','10_voxel2point','10_sigmoid','10_nms','10_zfilter']
     vals = {e.key: e.cuda_time_total/1000.0 for e in prof.key_averages() if e.key in labels}
     sync = sum(e.self_cuda_time_total for e in prof.key_averages()
