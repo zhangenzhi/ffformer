@@ -162,6 +162,13 @@ class ForestFormer3D(nn.Module):
         self.eval()
         if use_amp is None:
             use_amp = os.environ.get('FF_USE_AMP', '1') not in ('0', 'false', 'False')
+        # Optional experiment: run the decoder in native fp16 (params + acts,
+        # autocast disabled) so LayerNorm/softmax are NOT promoted to fp32 —
+        # removes the per-op cast copies. May drift results (fp16 stability).
+        if os.environ.get('FF_FP16_DECODER', '0') not in ('0', 'false', 'False') \
+                and not getattr(self, '_dec_half', False):
+            self.decoder.half()
+            self._dec_half = True
         device = points.device
         N = points.shape[0]
 
@@ -272,7 +279,7 @@ class ForestFormer3D(nn.Module):
                     queries = [x[0][selected]]
 
                     # ⑨ Decoder
-                    x_dec = self.decoder(x, queries)
+                    x_dec = self._call_decoder(x, queries)
 
                     # ⑩ Predict masks + scores
                     masks, scores, sem_res = self._predict_by_feat(
@@ -347,6 +354,15 @@ class ForestFormer3D(nn.Module):
         }
 
     # ──────────────────── Inference helpers ────────────────────
+
+    def _call_decoder(self, x, queries):
+        """Run the decoder. With FF_FP16_DECODER the decoder params are fp16 and
+        autocast is disabled so LayerNorm/softmax stay fp16 (no fp32 promotion /
+        cast copies); inputs are cast to fp16, outputs returned as-is."""
+        if getattr(self, '_dec_half', False):
+            with torch.autocast('cuda', enabled=False):
+                return self.decoder([xi.half() for xi in x], [qi.half() for qi in queries])
+        return self.decoder(x, queries)
 
     @staticmethod
     def _generate_regions(points, radius, step_size):
@@ -445,7 +461,7 @@ class ForestFormer3D(nn.Module):
                         p['dec_j'] = None
 
                 # ── Phase 4: one batched decoder forward for the tree regions ──
-                x_dec = self.decoder(x_for_dec, queries_for_dec) if x_for_dec else None
+                x_dec = self._call_decoder(x_for_dec, queries_for_dec) if x_for_dec else None
 
             # ── Phase 5: per-region post-process (sequential, score-priority) ──
             for b, p in enumerate(prepped):
