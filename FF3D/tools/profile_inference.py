@@ -20,21 +20,23 @@ import time
 import numpy as np
 import torch
 import laspy
+from torch.autograd import DeviceType
 from torch.profiler import profile, ProfilerActivity
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ff3d.model import ForestFormer3D
 from ff3d.model.forestformer3d import load_pretrained
 
-# op-name substrings -> category
+# CUDA-kernel-name substrings -> category (kernel view, device_type==CUDA)
 _CATS = [
-    ('attention',     ['bmm', 'baddbmm', '_softmax', 'scaled_dot', 'efficient_attention',
-                       'cutlass', 'addmm', 'linear']),
-    ('data-movement', ['copy_', 'elementwise', 'Memcpy', 'cat', 'contiguous', 'to_copy']),
-    ('spconv',        ['cumm', 'spconv', 'conv']),
-    ('mask',          ['masked_fill', 'bitwise', 'sigmoid', 'einsum', 'where']),
-    ('sync',          ['cudaMemcpyAsync', 'cudaStreamSynchronize', 'DtoH']),
-    ('reduce/index',  ['unique', 'index', 'sort', 'sum', 'mean', 'scatter', 'gather', 'nonzero']),
+    ('matmul(attn+proj)', ['gemm', 'wmma', 'tensorop', 'cutlass', 'bmm', 'ampere', 'volta',
+                           'SoftMax', 'softmax', 'fmha', 'flash', 'scaled_dot']),
+    ('data-movement',     ['elementwise', 'Memcpy', 'CatArray', 'vectorized', 'copy',
+                           'fill', 'direct_copy']),
+    ('spconv',            ['cumm', 'Sparse', 'spconv', 'implicit_gemm']),
+    ('mask/bitwise',      ['masked_fill', 'bitwise', 'Sigmoid', 'sigmoid', 'compare']),
+    ('reduce/index',      ['reduce', 'unique', 'sort', 'scatter', 'gather', 'index',
+                           'Sum', 'Mean', 'nonzero', 'arange', 'cumsum']),
 ]
 
 
@@ -99,7 +101,9 @@ def main():
     ins = out['instance_pred']
     print(f'profiled predict {wall:.1f}s, trees {len(np.unique(ins[ins >= 0]))}\n', flush=True)
 
-    ka = prof.key_averages()
+    # Sum only device-side kernel events (device_type == CUDA); the CPU aten
+    # dispatchers carry the same time and would double-count.
+    ka = [e for e in prof.key_averages() if e.device_type == DeviceType.CUDA]
     total = sum(e.self_cuda_time_total for e in ka) / 1000.0  # ms
     cats = {}
     for e in ka:
