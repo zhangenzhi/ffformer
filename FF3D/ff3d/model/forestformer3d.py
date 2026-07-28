@@ -3,6 +3,7 @@
 Pure PyTorch implementation — no mm* dependencies.
 Handles both training (loss) and inference (predict) paths.
 """
+import math
 import os
 import time
 
@@ -208,6 +209,12 @@ class ForestFormer3D(nn.Module):
         # Generate sliding window regions
         regions = self._generate_regions(points, self.radius, step_size)
 
+        # XY grid index for O(neighbourhood) cylinder crops (FF_GRID_CROP, default
+        # on; lossless — see _crop_region). Kills the per-region O(N) distance scan
+        # that dominates prep on huge whole-scene clouds.
+        self._grid_crop = os.environ.get('FF_GRID_CROP', '1') not in ('0', 'false', 'False')
+        xy_grid = self._build_xy_grid(points) if self._grid_crop else None
+
         # Global accumulators — kept on the GPU so per-region voting/merge never
         # round-trips to the CPU (the .cpu().numpy() + np.add.at path forced a
         # sync every region). Converted back to numpy once at the end.
@@ -225,7 +232,7 @@ class ForestFormer3D(nn.Module):
             max_instance = self._infer_batched(
                 points, regions, region_batch, grid_size, num_points, score_th1,
                 use_amp, progress_cb, votes_counter, all_pre_ins,
-                global_instance_scores, best_masks)
+                global_instance_scores, best_masks, xy_grid)
 
         from tqdm import tqdm
         _prof = bool(os.environ.get('FF_PROFILE'))
@@ -240,13 +247,19 @@ class ForestFormer3D(nn.Module):
         seq_regions = regions if region_batch == 1 else []
         for region_idx, region in enumerate(tqdm(seq_regions, desc="Inference")):
             _t = time.time() if _prof else None
-            # ① Cylinder crop
-            region_mask = ((points[:, 0] - region[0]) ** 2 +
-                           (points[:, 1] - region[1]) ** 2) <= self.radius ** 2
-            pc1 = points[region_mask]
-            pc1_indices = torch.where(region_mask)[0]
-            if len(pc1) == 0:
-                continue
+            # ① Cylinder crop (grid-indexed; pc1_indices carries the region point
+            # ids downstream — no O(N) boolean mask needed)
+            if self._grid_crop:
+                pc1, pc1_indices = self._crop_region(points, xy_grid, region[0], region[1])
+                if pc1 is None:
+                    continue
+            else:
+                region_mask = ((points[:, 0] - region[0]) ** 2 +
+                               (points[:, 1] - region[1]) ** 2) <= self.radius ** 2
+                pc1 = points[region_mask]
+                pc1_indices = torch.where(region_mask)[0]
+                if len(pc1) == 0:
+                    continue
             if _prof:
                 _t = _lap('1a_crop', _t)
 
@@ -323,7 +336,7 @@ class ForestFormer3D(nn.Module):
                     self._process_cylinder_results(
                         masks, scores, sem_res, pc1, pc3, pc1_indices, nn_idx_pc1,
                         region, score_th1, all_pre_ins, global_instance_scores,
-                        best_masks, max_instance, votes_counter, region_mask)
+                        best_masks, max_instance, votes_counter, pc1_indices)
                     max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
                     if _prof:
                         _t = _lap('3_post', _t)
@@ -331,7 +344,7 @@ class ForestFormer3D(nn.Module):
                     # No trees: just vote semantic labels (GPU)
                     proj_logits = bi_semantic_logits[inverse_mapping2]
                     cyl_sem = torch.argmax(proj_logits, dim=1)[nn_idx_pc1]
-                    self._vote(votes_counter, region_mask, cyl_sem)
+                    self._vote(votes_counter, pc1_indices, cyl_sem)
 
             del pc1, pc1_indices, pc2, pc2_indices, pc3, pc3_indices
             del embed_logits, bi_semantic_logits
@@ -396,6 +409,58 @@ class ForestFormer3D(nn.Module):
                 return self.decoder([xi.to(dt) for xi in x], [qi.to(dt) for qi in queries], xc)
         return self.decoder(x, queries, x_coarse)
 
+    def _build_xy_grid(self, points):
+        """Bucket points into a 2D XY grid (cell = radius) once, so each cylinder
+        crop scans only the ~3x3 cell neighborhood around its centre instead of all
+        N points. CSR layout: order[cell_start[c]:cell_start[c+1]] are the point
+        indices in cell c. cell_start lives on CPU so per-region slice bounds cost
+        no GPU sync; order stays on device for the gather."""
+        r = float(self.radius)
+        xmin = float(points[:, 0].min().item())
+        ymin = float(points[:, 1].min().item())
+        cellx = torch.floor((points[:, 0] - xmin) / r).long()
+        celly = torch.floor((points[:, 1] - ymin) / r).long()
+        ncx = int(cellx.max().item()) + 1
+        ncy = int(celly.max().item()) + 1
+        cell_id = cellx * ncy + celly
+        order = torch.argsort(cell_id)
+        counts = torch.bincount(cell_id, minlength=ncx * ncy)
+        cell_start = torch.zeros(ncx * ncy + 1, dtype=torch.long, device=points.device)
+        cell_start[1:] = counts.cumsum(0)
+        return dict(order=order, cell_start=cell_start.cpu().numpy(),
+                    xmin=xmin, ymin=ymin, cell=r, ncx=ncx, ncy=ncy)
+
+    def _crop_region(self, points, grid, cx, cy):
+        """Cylinder crop via the XY grid index. Bit-identical to the full O(N)
+        `((x-cx)^2+(y-cy)^2)<=r^2` scan: candidates come from the neighbourhood
+        cells, the exact distance test still runs, and the kept indices are sorted
+        ascending to reproduce boolean-mask order. Returns (pc1, pc1_indices) or
+        (None, None) if empty."""
+        r = grid['cell']; cs = grid['cell_start']; order = grid['order']
+        xmin = grid['xmin']; ymin = grid['ymin']; ncx = grid['ncx']; ncy = grid['ncy']
+        ix0 = max(0, int(math.floor((cx - r - xmin) / r)))
+        ix1 = min(ncx - 1, int(math.floor((cx + r - xmin) / r)))
+        iy0 = max(0, int(math.floor((cy - r - ymin) / r)))
+        iy1 = min(ncy - 1, int(math.floor((cy + r - ymin) / r)))
+        if ix0 > ix1 or iy0 > iy1:
+            return None, None
+        slices = []
+        for ix in range(ix0, ix1 + 1):            # cells iy0..iy1 are contiguous in a row
+            s = int(cs[ix * ncy + iy0]); e = int(cs[ix * ncy + iy1 + 1])
+            if e > s:
+                slices.append(order[s:e])
+        if not slices:
+            return None, None
+        cand = slices[0] if len(slices) == 1 else torch.cat(slices)
+        dx = points[cand, 0] - cx
+        dy = points[cand, 1] - cy
+        keep = (dx * dx + dy * dy) <= r * r
+        idx = cand[keep]
+        if idx.numel() == 0:
+            return None, None
+        idx = torch.sort(idx).values
+        return points[idx], idx
+
     @staticmethod
     def _generate_regions(points, radius, step_size):
         x_min, x_max = points[:, 0].min().item(), points[:, 0].max().item()
@@ -412,7 +477,7 @@ class ForestFormer3D(nn.Module):
 
     def _infer_batched(self, points, regions, region_batch, grid_size, num_points,
                        score_th1, use_amp, progress_cb, votes_counter, all_pre_ins,
-                       global_instance_scores, best_masks):
+                       global_instance_scores, best_masks, xy_grid=None):
         """Batched sliding-window inference: FF_REGION_BATCH regions per forward.
 
         Mutates votes_counter / all_pre_ins / global_instance_scores / best_masks
@@ -432,13 +497,19 @@ class ForestFormer3D(nn.Module):
             # ── Phase 1: per-region prep (crop, voxelize, sample, collate) ──
             prepped = []
             for region in batch:
-                region_mask = ((points[:, 0] - region[0]) ** 2 +
-                               (points[:, 1] - region[1]) ** 2) <= self.radius ** 2
-                pc1 = points[region_mask]
-                if len(pc1) == 0:
-                    done += 1
-                    continue
-                pc1_indices = torch.where(region_mask)[0]
+                if xy_grid is not None:
+                    pc1, pc1_indices = self._crop_region(points, xy_grid, region[0], region[1])
+                    if pc1 is None:
+                        done += 1
+                        continue
+                else:
+                    region_mask = ((points[:, 0] - region[0]) ** 2 +
+                                   (points[:, 1] - region[1]) ** 2) <= self.radius ** 2
+                    pc1 = points[region_mask]
+                    if len(pc1) == 0:
+                        done += 1
+                        continue
+                    pc1_indices = torch.where(region_mask)[0]
                 pc2, pc2_indices, grid_inverse = grid_sample(pc1, pc1_indices, grid_size)
                 if len(pc2) <= num_points:
                     pc3, nn_idx_pc1 = pc2, grid_inverse
@@ -446,7 +517,7 @@ class ForestFormer3D(nn.Module):
                     choices = np.random.choice(len(pc2), num_points, replace=False)
                     pc3, nn_idx_pc1 = pc2[choices], None
                 coords, feats, inv, spatial = self.collate([pc3])
-                prepped.append(dict(region=region, region_mask=region_mask, pc1=pc1,
+                prepped.append(dict(region=region, region_ids=pc1_indices, pc1=pc1,
                                     pc1_indices=pc1_indices, pc3=pc3, nn_idx_pc1=nn_idx_pc1,
                                     coords=coords, feats=feats, inv=inv, spatial=spatial))
 
@@ -505,13 +576,13 @@ class ForestFormer3D(nn.Module):
                         masks, scores, sem_res, p['pc1'], p['pc3'], p['pc1_indices'],
                         p['nn_idx_pc1'], p['region'], score_th1, all_pre_ins,
                         global_instance_scores, best_masks, max_instance,
-                        votes_counter, p['region_mask'])
+                        votes_counter, p['region_ids'])
                     max_instance += int(masks.shape[0]) if masks is not None and len(masks) > 0 else 0
                 else:
                     # No trees: semantic voting only (GPU)
                     proj_logits = p['bi_logits'][p['inv']]
                     cyl_sem = torch.argmax(proj_logits, dim=1)[p['nn_idx_pc1']]
-                    self._vote(votes_counter, p['region_mask'], cyl_sem)
+                    self._vote(votes_counter, p['region_ids'], cyl_sem)
 
             done += len(prepped)
             torch.cuda.empty_cache()
@@ -587,20 +658,21 @@ class ForestFormer3D(nn.Module):
         return mask_pred[keep], scores[keep], sem_res
 
     @staticmethod
-    def _vote(votes_counter, region_mask, sem_per_point):
-        """GPU semantic vote: votes_counter[global_idx, class] += 1.
+    def _vote(votes_counter, region_ids, sem_per_point):
+        """GPU semantic vote: votes_counter[region_ids[i], sem_per_point[i]] += 1.
 
         Integer atomic add via index_put_(accumulate=True) — exactly equivalent
         to np.add.at, but stays on device (no .cpu().numpy() round-trip).
+        region_ids are the crop's ascending global point indices (== the old
+        torch.where(region_mask)[0]); sem_per_point aligns with them.
         """
-        ids = torch.where(region_mask)[0]
-        ones = torch.ones(ids.shape[0], dtype=votes_counter.dtype, device=votes_counter.device)
-        votes_counter.index_put_((ids, sem_per_point.long()), ones, accumulate=True)
+        ones = torch.ones(region_ids.shape[0], dtype=votes_counter.dtype, device=votes_counter.device)
+        votes_counter.index_put_((region_ids, sem_per_point.long()), ones, accumulate=True)
 
     def _process_cylinder_results(self, masks, scores, sem_res, pc1, pc3,
                                    pc1_indices, nn_idx_pc1, region, score_th,
                                    all_pre_ins, global_instance_scores,
-                                   best_masks, max_instance, votes_counter, region_mask):
+                                   best_masks, max_instance, votes_counter, region_ids):
         """Process per-cylinder predictions: edge filter, score merge, vote.
 
         Accumulators (votes_counter / all_pre_ins / global_instance_scores) are
@@ -608,7 +680,7 @@ class ForestFormer3D(nn.Module):
         region to build best_masks. Numerically identical to the numpy path.
         """
         if masks is None or len(masks) == 0:
-            self._vote(votes_counter, region_mask, sem_res[nn_idx_pc1])
+            self._vote(votes_counter, region_ids, sem_res[nn_idx_pc1])
             return
 
         valid_scores = scores > score_th
@@ -670,7 +742,7 @@ class ForestFormer3D(nn.Module):
                                        float(scores_kept_c[int(mid)])))
 
         # Semantic voting (GPU)
-        self._vote(votes_counter, region_mask, sem_res[nn_idx_pc1])
+        self._vote(votes_counter, region_ids, sem_res[nn_idx_pc1])
 
     @staticmethod
     def _merge_instances(all_pre_ins, best_masks, overlap_threshold=0.3):
