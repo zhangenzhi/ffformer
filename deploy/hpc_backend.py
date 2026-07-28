@@ -455,7 +455,7 @@ def list_hpc_datasets():
         f"  sz=$(stat -c%s \"$f\" 2>/dev/null); "
         f"  res=$([ -f \"$d/result.ply\" ] && echo 1 || echo 0); "
         f"  meta=$(cat \"$d/meta.json\" 2>/dev/null | tr -d '\\n'); "
-        f"  echo \"$id|${{f##*.}}|$sz|$res|$meta\"; "
+        f"  echo \"$id|$f|$sz|$res|$meta\"; "
         f"done")
     client = _connect()
     try:
@@ -465,10 +465,11 @@ def list_hpc_datasets():
             parts = line.split('|', 4)
             if len(parts) < 5:
                 continue
-            ds_id, ext, sz, res, meta = parts
-            entry = {'dataset_id': ds_id, 'hpc_suffix': '.' + ext.lower(),
+            ds_id, path, sz, res, meta = parts
+            ext = path.rsplit('.', 1)[-1].lower()
+            entry = {'dataset_id': ds_id, 'path': path, 'hpc_suffix': '.' + ext,
                      'size': int(sz) if sz.isdigit() else 0,
-                     'filename': f'{ds_id}.{ext.lower()}',
+                     'filename': f'{ds_id}.{ext}',
                      'has_result': res == '1'}
             if meta.strip():
                 try:

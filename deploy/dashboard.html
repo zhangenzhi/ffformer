@@ -1744,33 +1744,56 @@ async function switchModel() {
 // ==================== DATA BROWSER ====================
 async function refreshData() {
   try {
-    const resp = await fetch(`${API}/data`);
-    const files = await resp.json();
     const panel = document.getElementById('dataPanel');
-
-    if (!files.length) {
-      panel.innerHTML = '<div class="files-empty">No LiDAR data files found on server</div>';
-      return;
-    }
-
     let html = '';
+
+    // Your uploaded datasets — persisted on the HPC, so they survive server
+    // restarts (rebuilt from the HPC on demand). Segment reuses the config panel.
+    try {
+      const dss = await (await fetch(`${API}/datasets`)).json();
+      const ready = (dss || []).filter(d => d.hpc_ready);
+      if (ready.length) {
+        html += '<div class="data-section-label">Your datasets</div>';
+        for (const d of ready) {
+          const sizeMB = (d.size / 1048576).toFixed(1);
+          const nm = (d.filename || d.dataset_id).replace(/"/g, '&quot;');
+          html += `<div class="data-item">
+            <div class="data-icon">&#x1F4C1;</div>
+            <div class="data-info">
+              <div class="data-name">${d.filename || d.dataset_id}</div>
+              <div class="data-meta">${sizeMB} MB &middot; ${(d.format || '').toUpperCase()}${d.restored ? ' &middot; restored' : ''}</div>
+            </div>
+            <button class="btn-run" data-ds="${d.dataset_id}" data-name="${nm}" onclick="openDatasetFromList(this.dataset.ds, this.dataset.name)">Segment</button>
+          </div>`;
+        }
+      }
+    } catch (e) { /* datasets are optional */ }
+
+    // Reference/example data files on the server
+    const files = await (await fetch(`${API}/data`)).json();
     for (const f of files) {
       const sizeMB = (f.size / 1048576).toFixed(1);
-      const typeLabel = f.type.toUpperCase();
       html += `<div class="data-item">
         <div class="data-icon">&#x1F4E1;</div>
         <div class="data-info">
           <div class="data-name" title="${f.path}">${f.filename}</div>
-          <div class="data-meta">${sizeMB} MB &middot; ${typeLabel} &middot; ${formatTime(f.modified)}</div>
+          <div class="data-meta">${sizeMB} MB &middot; ${f.type.toUpperCase()} &middot; ${formatTime(f.modified)}</div>
         </div>
         <button class="btn-run" data-path="${f.path.replace(/"/g, '&quot;')}" onclick="runDataInference(this.dataset.path)">Run</button>
       </div>`;
     }
-    panel.innerHTML = html;
+
+    panel.innerHTML = html || '<div class="files-empty">No LiDAR data found on server</div>';
   } catch (e) {
     console.error('Failed to load data files:', e);
     document.getElementById('dataPanel').innerHTML = '<div class="files-empty">Failed to load data files</div>';
   }
+}
+
+function openDatasetFromList(dsId, name) {
+  pendingDataset = {dataset_id: dsId, name: name, hpc_ready: true};
+  switchPage('segment');
+  showSegmentConfig();
 }
 
 async function runDataInference(dataPath) {
