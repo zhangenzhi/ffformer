@@ -2571,6 +2571,19 @@ function selectMediaItem(id) {
   renderMediaInspector();
 }
 
+async function deleteDatasetUI(dsId) {
+  if (!confirm('Delete this dataset from the HPC? This cannot be undone.')) return;
+  try {
+    const resp = await fetch(`${API}/dataset/${dsId}`, {method:'DELETE'});
+    if (!resp.ok) { const d = await resp.json().catch(()=>({})); throw new Error(d.detail || ('HTTP '+resp.status)); }
+    selectedMediaId = null;
+    mediaItems = mediaItems.filter(m => m.dataset_id !== dsId);
+    renderMediaGrid();
+    renderMediaInspector();
+    refreshMediaLibrary();
+  } catch (e) { alert('Delete failed: ' + e.message); }
+}
+
 function renderMediaInspector() {
   const insp = document.getElementById('mediaInspector');
   const m = mediaItems.find(x => x.id === selectedMediaId);
@@ -2597,6 +2610,10 @@ function renderMediaInspector() {
   } else {
     const lbl = m.hpc_stage === 'uploading' ? `Uploading ${m.upload_progress||0}%` : 'Staging to HPC…';
     action = `<button class="btn btn-primary" disabled><span class="spin"></span> ${lbl}</button>`;
+  }
+  // Uploaded datasets can be deleted from the HPC.
+  if (m.source === 'dataset' && m.dataset_id) {
+    action += `<button class="btn btn-secondary" style="margin-top:8px" onclick="deleteDatasetUI('${m.dataset_id}')">&#x1F5D1; Delete dataset</button>`;
   }
   const sub = m.source==='task' ? 'Completed task'
             : m.source==='server' ? 'On HPC'

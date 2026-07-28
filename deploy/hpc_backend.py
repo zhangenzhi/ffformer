@@ -13,6 +13,7 @@ Connectivity: pod → HPC login node over the campus-internal network
 K8s Secret (HPC_KEY_PATH).
 """
 import json
+import base64
 import os
 import posixpath
 import stat as statmod
@@ -478,6 +479,90 @@ def list_hpc_datasets():
                     pass
             rows.append(entry)
         return rows
+    finally:
+        client.close()
+
+
+def list_hpc_results():
+    """Rebuild the completed-task index from the HPC. Every deploy_jobs/<id> with a
+    status.json (or result.ply) is a finished segmentation whose result persists on
+    the HPC even when the server's /tmp results are wiped on restart. One SSH pass
+    emits id|has_viewer|base64(status.json)|base64(meta.json)."""
+    base = posixpath.join(HPC_WORKDIR, 'deploy_jobs')
+    cmd = (
+        f"for d in {base}/*/; do id=$(basename \"$d\"); "
+        f"  if [ -f \"$d/status.json\" ] && [ -f \"$d/result.ply\" ]; then "
+        f"    st=$(base64 -w0 < \"$d/status.json\" 2>/dev/null); "
+        f"    mt=$(base64 -w0 < \"$d/meta.json\" 2>/dev/null); "
+        f"    hv=$([ -d \"$d/viewer\" ] && echo 1 || echo 0); "
+        f"    echo \"$id|$hv|$st|$mt\"; fi; done")
+    client = _connect()
+    try:
+        rc, out, _ = _exec(client, cmd)
+        rows = []
+        for line in out.strip().splitlines():
+            parts = line.split('|', 3)
+            if len(parts) < 4:
+                continue
+            tid, hv, st_b64, mt_b64 = parts
+            try:
+                status = json.loads(base64.b64decode(st_b64)) if st_b64 else {}
+            except Exception:
+                status = {}
+            name = tid
+            if mt_b64:
+                try:
+                    name = json.loads(base64.b64decode(mt_b64)).get('filename', tid)
+                except Exception:
+                    pass
+            rows.append({'task_id': tid, 'filename': name, 'has_viewer': hv == '1',
+                         'stats': status.get('stats', {}),
+                         'step': status.get('step', 'completed')})
+        return rows
+    finally:
+        client.close()
+
+
+def fetch_result_bundle(task_id, local_dir):
+    """Download + extract a finished task's result bundle from the HPC into
+    local_dir, so the viewer/result endpoints (which read the pod filesystem) work
+    for results restored after a restart. Returns True on success."""
+    if not task_id or '/' in task_id or '..' in task_id:
+        raise ValueError(f"bad task id: {task_id}")
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', task_id)
+    os.makedirs(local_dir, exist_ok=True)
+    client = _connect()
+    try:
+        # Prefer the prebuilt bundle; fall back to result.ply + stats + viewer.
+        rc, out, _ = _exec(client, f"test -f {rdir}/result_bundle.tar.gz && echo y || echo n")
+        sftp = client.open_sftp()
+        if out.strip().endswith('y'):
+            local_tar = os.path.join(local_dir, 'result_bundle.tar.gz')
+            sftp.get(posixpath.join(rdir, 'result_bundle.tar.gz'), local_tar)
+            import tarfile
+            with tarfile.open(local_tar) as tf:
+                tf.extractall(local_dir)
+            os.remove(local_tar)
+            return True
+        for fn in ('result.ply', 'stats.json', 'status.json'):
+            try:
+                sftp.get(posixpath.join(rdir, fn), os.path.join(local_dir, fn))
+            except Exception:
+                pass
+        return os.path.isfile(os.path.join(local_dir, 'result.ply'))
+    finally:
+        client.close()
+
+
+def delete_hpc_dataset(ds_id):
+    """Remove a dataset's directory (input + any results) from the HPC so it does
+    not reappear on the next index rebuild. ds_id is validated to be a bare id."""
+    if not ds_id or '/' in ds_id or '..' in ds_id:
+        raise ValueError(f"bad dataset id: {ds_id}")
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', ds_id)
+    client = _connect()
+    try:
+        _exec(client, f"rm -rf {rdir}")
     finally:
         client.close()
 

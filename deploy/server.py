@@ -945,6 +945,54 @@ def _sync_datasets_from_hpc():
     print(f'[sync] restored {n} datasets from HPC ({len(found)} on cluster)', flush=True)
 
 
+def _sync_results_from_hpc():
+    """Rebuild completed tasks from results persisted on the HPC. The pod's /tmp
+    results are wiped on restart, but deploy_jobs/<id>/result.ply + stats + viewer
+    survive. Runs once, lazily, on the first /tasks listing."""
+    if INFERENCE_BACKEND != 'hpc' or getattr(_sync_results_from_hpc, '_done', False):
+        return
+    try:
+        _ensure_paramiko()
+        from deploy.hpc_backend import list_hpc_results
+        found = list_hpc_results()
+    except Exception as ex:
+        print(f'[sync] HPC result rebuild failed: {ex}', flush=True)
+        return
+    n = 0
+    for e in found:
+        tid = e['task_id']
+        if tid in tasks:
+            continue
+        tasks[tid] = {
+            'task_id': tid, 'status': 'completed', 'step': 'completed',
+            'step_label': 'Completed', 'progress': 100,
+            'filename': e.get('filename', tid), 'stats': e.get('stats', {}),
+            'has_viewer': e.get('has_viewer', False), 'restored': True,
+            'created': time.time(), 'updated': time.time(),
+        }
+        n += 1
+    _sync_results_from_hpc._done = True
+    print(f'[sync] restored {n} results from HPC', flush=True)
+
+
+def _ensure_result_local(tid):
+    """A result restored from the HPC has no local files (pod /tmp was wiped). On
+    first access, download+extract its bundle so the viewer/result endpoints work."""
+    task_dir = os.path.join(RESULTS_DIR, tid)
+    if os.path.isfile(os.path.join(task_dir, 'result.ply')) or \
+       os.path.isfile(os.path.join(task_dir, 'viewer', 'metadata.json')):
+        return
+    t = tasks.get(tid)
+    if INFERENCE_BACKEND != 'hpc' or not t or not t.get('restored'):
+        return
+    try:
+        _ensure_paramiko()
+        from deploy.hpc_backend import fetch_result_bundle
+        fetch_result_bundle(tid, task_dir)
+    except Exception as ex:
+        print(f'[result] fetch for {tid} failed: {ex}', flush=True)
+
+
 @app.get("/datasets")
 def list_datasets():
     _sync_datasets_from_hpc()
@@ -959,10 +1007,17 @@ def list_datasets():
 
 @app.delete("/dataset/{ds_id}")
 def delete_dataset(ds_id: str):
-    if ds_id not in datasets:
-        raise HTTPException(404, "Dataset not found")
+    _sync_datasets_from_hpc()   # so HPC-only datasets are known/deletable
     shutil.rmtree(os.path.join(IMPORT_DIR, ds_id), ignore_errors=True)
-    del datasets[ds_id]
+    datasets.pop(ds_id, None)
+    # Remove the HPC copy too, else it reappears on the next rebuild.
+    if INFERENCE_BACKEND == 'hpc':
+        try:
+            _ensure_paramiko()
+            from deploy.hpc_backend import delete_hpc_dataset
+            delete_hpc_dataset(ds_id)
+        except Exception as e:
+            print(f'[delete] HPC removal failed for {ds_id}: {e}', flush=True)
     return JSONResponse({'status': 'deleted', 'dataset_id': ds_id})
 
 
@@ -1211,6 +1266,7 @@ def list_all_files():
 @app.get("/viewer/{task_id}/metadata.json")
 def viewer_metadata(task_id: str):
     """Serve octree metadata for streaming viewer."""
+    _ensure_result_local(task_id)
     meta_path = os.path.join(RESULTS_DIR, task_id, 'viewer', 'metadata.json')
     if not os.path.exists(meta_path):
         raise HTTPException(404, "Viewer tiles not available for this task")
@@ -1223,6 +1279,7 @@ def viewer_tile(task_id: str, node_key: str):
     # Sanitize node_key to prevent path traversal
     if not all(c in 'r01234567' for c in node_key):
         raise HTTPException(400, "Invalid tile key")
+    _ensure_result_local(task_id)
     tile_path = os.path.join(RESULTS_DIR, task_id, 'viewer', 'tiles', f'{node_key}.bin')
     if not os.path.exists(tile_path):
         raise HTTPException(404, "Tile not found")
@@ -1232,16 +1289,17 @@ def viewer_tile(task_id: str, node_key: str):
 @app.get("/result/{task_id}/ply")
 def download_ply(task_id: str):
     """Download/stream result PLY file as text (for viewer) or binary."""
+    _ensure_result_local(task_id)
     if task_id not in tasks:
         raise HTTPException(404, "Task not found")
     task = tasks[task_id]
     if task['status'] != 'completed':
         raise HTTPException(400, f"Task status: {task['status']}")
-    # Return as text so the JS viewer can parse it
-    return FileResponse(
-        task['result_ply'],
-        media_type='application/octet-stream',
-        filename=f'{task_id}_result.ply')
+    ply = task.get('result_ply') or os.path.join(RESULTS_DIR, task_id, 'result.ply')
+    if not os.path.isfile(ply):
+        raise HTTPException(404, "Result PLY not found")
+    return FileResponse(ply, media_type='application/octet-stream',
+                        filename=f'{task_id}_result.ply')
 
 
 @app.get("/result/{task_id}/json")
@@ -1261,6 +1319,7 @@ def download_json(task_id: str):
 @app.get("/result/{task_id}/trees")
 def result_trees(task_id: str):
     """Per-tree metrics computed from the result PLY (cached as trees.json)."""
+    _ensure_result_local(task_id)
     task_dir = os.path.join(RESULTS_DIR, task_id)
     ply_path = os.path.join(task_dir, 'result.ply')
     if not os.path.isfile(ply_path):
@@ -1319,6 +1378,7 @@ def analyze_tree_endpoint(task_id: str, tree_id: int, lang: str = 'zh'):
 @app.get("/tasks")
 def list_tasks():
     """List all tasks with their current status and progress."""
+    _sync_results_from_hpc()
     result = {}
     for tid, t in tasks.items():
         result[tid] = {
