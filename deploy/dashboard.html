@@ -2484,6 +2484,22 @@ async function refreshMediaLibrary() {
     }
   }
 
+  // Your uploaded datasets — persisted on the HPC, so they survive server
+  // restarts (the index is rebuilt from the HPC on demand). Shown as ready-to-
+  // segment cards; "Send to Segment" reuses the config panel (model dropdown).
+  try {
+    const dss = await fetch(`${API}/datasets`).then(r => r.json());
+    for (const d of (dss || [])) {
+      if (!d.hpc_ready) continue;
+      const id = 'dataset:' + d.dataset_id;
+      if (mediaItems.some(m => m.id === id)) continue;
+      mediaItems.push({ id, source:'dataset', dataset_id:d.dataset_id,
+        name:d.filename || d.dataset_id,
+        format:(d.format || d.hpc_suffix || '').replace('.', ''),
+        size:d.size, hpc_ready:true, hpc_stage:'ready' });
+    }
+  } catch (e) { /* datasets optional */ }
+
   renderMediaGrid();
 
   // Server data files
