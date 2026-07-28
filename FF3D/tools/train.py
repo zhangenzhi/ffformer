@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ff3d.model import ForestFormer3D
+from ff3d.model.forestformer3d import load_pretrained
 from ff3d.data import ForAINetV2Dataset, collate_fn
 from ff3d.loss import discriminative_loss, instance_loss_layer, semantic_loss_with_aux
 from ff3d.utils.grid_utils import grid_subsample_queries
@@ -44,7 +45,11 @@ def compute_loss(model, batch, epoch, prepare_epoch=1000, device='cuda'):
     # Forward: collate → backbone → aux heads
     coordinates, features, inverse_mapping, spatial_shape = model.collate(points_list)
     x_sparse = spconv.SparseConvTensor(features, coordinates, spatial_shape, batch_size)
-    x = model.extract_feat(x_sparse)
+    coarse_attn = getattr(model, '_coarse_attn', False)
+    if coarse_attn:
+        x, x_coarse = model.extract_feat(x_sparse, return_coarse=True)
+    else:
+        x, x_coarse = model.extract_feat(x_sparse), None
 
     embed_logits = [model.Embed(y) for y in x]
     bi_semantic_logits = [model.BiSemantic(y) for y in x]
@@ -134,8 +139,11 @@ def compute_loss(model, batch, epoch, prepare_epoch=1000, device='cuda'):
         queries_valid = [queries_list[i] for i in valid_indices]
         inslabel_valid = [queries_inslabel_list[i] for i in valid_indices]
 
-        # Decoder forward
-        decoder_out = model.decoder(x_valid, queries_valid)
+        # Decoder forward. In coarse-attn mode the iterative cross-attention runs
+        # over the coarse U-Net scale; the final mask is projected back to fine
+        # voxels, so the GT masks (fine voxel resolution) still align.
+        xc_valid = [x_coarse[i] for i in valid_indices] if coarse_attn else None
+        decoder_out = model.decoder(x_valid, queries_valid, xc_valid)
 
         # Prepare GT masks for instance loss
         n_sem = model.num_classes
@@ -253,7 +261,17 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--prepare-epoch', type=int, default=1000)
     parser.add_argument('--num-workers', type=int, default=12)
+    # Coarse-attn decoder fine-tuning
+    parser.add_argument('--coarse-attn', action='store_true',
+                        help='train the coarse-attention decoder path')
+    parser.add_argument('--coarse-scale', type=int, default=2,
+                        help='U-Net scale used as coarse memory (FF_COARSE_SCALE)')
+    parser.add_argument('--init-from', default=None,
+                        help='load model weights only (fresh optimizer) — for fine-tuning')
+    parser.add_argument('--freeze-backbone', action='store_true',
+                        help='freeze backbone + aux heads; train the decoder only')
     args = parser.parse_args()
+    os.environ['FF_COARSE_SCALE'] = str(args.coarse_scale)
 
     os.makedirs(args.work_dir, exist_ok=True)
     device = 'cuda'
@@ -266,6 +284,25 @@ def main():
             d_model=256, num_heads=8, hidden_dim=1024, dropout=0.0,
             activation='gelu', fix_attention=True, objectness_flag=True, attn_mask=True)
     ).to(device)
+    model._coarse_attn = args.coarse_attn
+
+    # Fine-tuning init: load pretrained weights only (fresh optimizer/scheduler).
+    # load_pretrained handles the spconv weight permutation + tolerates the new
+    # coarse projection keys being missing (they stay randomly initialised).
+    if args.init_from:
+        load_pretrained(model, args.init_from)
+        print(f"Initialised weights from {args.init_from} "
+              f"(coarse projections random, will be trained)")
+
+    # Freeze backbone + aux heads so only the decoder (incl. coarse projections)
+    # adapts — the pretrained features are already good and this cuts compute.
+    if args.freeze_backbone:
+        frozen = 0
+        for name, p in model.named_parameters():
+            if not name.startswith('decoder.'):
+                p.requires_grad_(False)
+                frozen += p.numel()
+        print(f"Froze {frozen/1e6:.1f}M non-decoder params; training decoder only")
 
     # Data
     train_set = ForAINetV2Dataset(
@@ -277,8 +314,10 @@ def main():
         num_workers=args.num_workers, collate_fn=collate_fn,
         pin_memory=True, prefetch_factor=10, persistent_workers=True)
 
-    # Optimizer + PolyLR scheduler (matching original)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    # Optimizer + PolyLR scheduler (matching original). Only optimise params that
+    # still require grad (backbone may be frozen for coarse-attn fine-tuning).
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=0.05)
     total_iters = args.epochs * len(train_loader)
     scheduler = torch.optim.lr_scheduler.PolynomialLR(
         optimizer, total_iters=total_iters, power=0.9)

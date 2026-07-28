@@ -42,9 +42,15 @@ def main():
     parser.add_argument("--radius", type=float, default=16)
     parser.add_argument("--voxel-size", type=float, default=0.2)
     parser.add_argument("--query-num", type=int, default=300)
+    parser.add_argument("--native-ckpt", action="store_true",
+                        help="checkpoint is from our training ({'model':...}), not mm* format")
+    parser.add_argument("--no-save", action="store_true",
+                        help="skip PLY write — measure pure inference time")
     args = parser.parse_args()
 
-    if args.output is None:
+    if args.no_save:
+        args.output = None
+    elif args.output is None:
         base = os.path.splitext(os.path.basename(args.input))[0]
         args.output = os.path.join("results", f"{base}.ply")
 
@@ -64,7 +70,11 @@ def main():
             dropout=0.0, activation='gelu', fix_attention=True,
             objectness_flag=True, attn_mask=True))
 
-    load_pretrained(model, args.checkpoint)
+    if args.native_ckpt:
+        ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+        model.load_state_dict(ckpt['model'] if 'model' in ckpt else ckpt)
+    else:
+        load_pretrained(model, args.checkpoint)
     model = model.cuda().eval()
     print(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()):,d}")
 

@@ -7,25 +7,46 @@ import numpy as np
 from scipy import stats
 
 
+def _compact_instances(ins_f, sem_f, skip_val, ins_class):
+    """Assign compact 0..K-1 labels to instances whose majority semantic label is
+    ins_class (others → -1). Returns (labels[N], K, sizes[K]). Loops over the few
+    hundred unique instance ids only — never over points in Python."""
+    labels = np.full(ins_f.shape[0], -1, dtype=np.int64)
+    sizes = []
+    next_id = 0
+    for g in np.unique(ins_f):
+        if g == skip_val:
+            continue
+        tmp = ins_f == g
+        seg_i = int(stats.mode(sem_f[tmp], keepdims=True)[0][0])
+        if seg_i == ins_class:
+            labels[tmp] = next_id
+            sizes.append(int(tmp.sum()))
+            next_id += 1
+    return labels, next_id, np.asarray(sizes, dtype=np.int64)
+
+
 def evaluate_scene(sem_pred, ins_pred, sem_gt, ins_gt,
                    stuff_class_inds=(0,), thing_class_inds=(1, 2)):
-    """Evaluate one scene. Returns raw counts for global aggregation."""
+    """Evaluate one scene. Returns raw counts for global aggregation.
+
+    Fully vectorized (numpy) — mathematically identical to the original per-point /
+    nested-loop protocol, but the per-point semantic confusion is done with
+    bincount and the pred×gt instance IoU with a single co-occurrence matrix
+    (np.add.at) instead of an O(n_pred·n_gt·N) double loop over full arrays.
+    """
     NUM_SEM = 4    # 0:unclassified, 1:ground, 2:wood, 3:leaf
     NUM_BIN = 3    # 0:unclassified, 1:stuff, 2:thing
 
     # Shift by 1 (0 = unclassified)
-    sem_gt_i = sem_gt + 1
-    sem_pre_i = sem_pred + 1
+    sem_gt_i = (sem_gt + 1).astype(np.int64)
+    sem_pre_i = (sem_pred + 1).astype(np.int64)
 
-    # Semantic confusion
-    true_pos_sem = np.zeros(NUM_SEM)
-    pos_sem = np.zeros(NUM_SEM)
-    gt_sem = np.zeros(NUM_SEM)
-    for j in range(len(sem_gt_i)):
-        gl, pl = int(sem_gt_i[j]), int(sem_pre_i[j])
-        gt_sem[gl] += 1
-        pos_sem[pl] += 1
-        true_pos_sem[gl] += int(gl == pl)
+    # Semantic confusion (bincount == per-point tally; slice guards stray labels)
+    gt_sem = np.bincount(sem_gt_i, minlength=NUM_SEM)[:NUM_SEM].astype(float)
+    pos_sem = np.bincount(sem_pre_i, minlength=NUM_SEM)[:NUM_SEM].astype(float)
+    sem_match = sem_gt_i == sem_pre_i
+    true_pos_sem = np.bincount(sem_gt_i[sem_match], minlength=NUM_SEM)[:NUM_SEM].astype(float)
 
     # Binary mapping: stuff → 1, thing → 2
     sem_gt_bi = np.copy(sem_gt_i)
@@ -37,14 +58,10 @@ def evaluate_scene(sem_pred, ins_pred, sem_gt, ins_gt,
         sem_gt_bi[sem_gt_i == tc + 1] = 2
         sem_pre_bi[sem_pre_i == tc + 1] = 2
 
-    true_pos_bi = np.zeros(NUM_BIN)
-    pos_bi = np.zeros(NUM_BIN)
-    gt_bi = np.zeros(NUM_BIN)
-    for j in range(len(sem_gt_bi)):
-        gl, pl = int(sem_gt_bi[j]), int(sem_pre_bi[j])
-        gt_bi[gl] += 1
-        pos_bi[pl] += 1
-        true_pos_bi[gl] += int(gl == pl)
+    gt_bi = np.bincount(sem_gt_bi, minlength=NUM_BIN)[:NUM_BIN].astype(float)
+    pos_bi = np.bincount(sem_pre_bi, minlength=NUM_BIN)[:NUM_BIN].astype(float)
+    bi_match = sem_gt_bi == sem_pre_bi
+    true_pos_bi = np.bincount(sem_gt_bi[bi_match], minlength=NUM_BIN)[:NUM_BIN].astype(float)
 
     # Instance evaluation (filter ground)
     idxc = (sem_gt_bi != 1) | (sem_pre_bi != 1)
@@ -55,66 +72,43 @@ def evaluate_scene(sem_pred, ins_pred, sem_gt, ins_gt,
 
     INS_CLASS = 2  # tree
 
-    # Predicted instances grouped by class
-    pts_in_pred = []
-    for g in np.unique(pred_ins_f):
-        if g == -1:
-            continue
-        tmp = pred_ins_f == g
-        seg_i = int(stats.mode(pred_sem_f[tmp], keepdims=True)[0][0])
-        if seg_i == INS_CLASS:
-            pts_in_pred.append(tmp)
+    # Compact tree-instance labels (skip pred -1 / gt 0, as in the original).
+    P, n_pred, psize = _compact_instances(pred_ins_f, pred_sem_f, -1, INS_CLASS)
+    G, n_gt, gsize = _compact_instances(gt_ins_f, gt_sem_f, 0, INS_CLASS)
 
-    # GT instances grouped by class
-    pts_in_gt = []
-    for g in np.unique(gt_ins_f):
-        if g == 0:
-            continue
-        tmp = gt_ins_f == g
-        seg_i = int(stats.mode(gt_sem_f[tmp], keepdims=True)[0][0])
-        if seg_i == INS_CLASS:
-            pts_in_gt.append(tmp)
+    # IoU matrix (n_pred, n_gt) via a single co-occurrence pass.
+    if n_pred and n_gt:
+        both = (P >= 0) & (G >= 0)
+        inter = np.zeros((n_pred, n_gt), dtype=np.int64)
+        np.add.at(inter, (P[both], G[both]), 1)
+        union = psize[:, None] + gsize[None, :] - inter   # >=1 (both sides non-empty)
+        iou = inter / union
+    else:
+        iou = np.zeros((n_pred, n_gt))
 
-    # PQ metrics
-    n_gt = len(pts_in_gt)
-    tp_list = []
-    fp_list = []
+    # PQ metrics: each pred matched to its best-IoU gt (>=0.5 → TP, else FP).
+    tp_list, fp_list = [], []
     iou_tp = 0.0
-
-    for ip, ins_pred_mask in enumerate(pts_in_pred):
-        ovmax = -1.0
-        if not pts_in_gt:
-            fp_list.append(1.0)
-            continue
-        for ins_gt_mask in pts_in_gt:
-            inter = (ins_pred_mask & ins_gt_mask).sum()
-            union = (ins_pred_mask | ins_gt_mask).sum()
-            iou = float(inter) / union
-            if iou > ovmax:
-                ovmax = iou
-        if ovmax >= 0.5:
-            tp_list.append(1.0)
-            iou_tp += ovmax
+    if n_pred:
+        if n_gt == 0:
+            fp_list = [1.0] * n_pred                      # no gt → every pred is FP
         else:
-            fp_list.append(1.0)
+            ovmax = iou.max(axis=1)                       # best gt per pred
+            tp_mask = ovmax >= 0.5
+            n_tp = int(tp_mask.sum())
+            tp_list = [1.0] * n_tp
+            fp_list = [1.0] * (n_pred - n_tp)
+            iou_tp = float(ovmax[tp_mask].sum())
 
-    # Coverage
+    # Coverage: each gt covered by its best-IoU pred.
     sum_cov = 0.0
     num_gt_pt = 0
     mean_weighted_cov = 0.0
-    if pts_in_gt and pts_in_pred:
-        for ins_gt_mask in pts_in_gt:
-            ovmax = 0.0
-            ngt = ins_gt_mask.sum()
-            num_gt_pt += ngt
-            for ins_pred_mask in pts_in_pred:
-                inter = (ins_pred_mask & ins_gt_mask).sum()
-                union = (ins_pred_mask | ins_gt_mask).sum()
-                iou = float(inter) / union
-                if iou > ovmax:
-                    ovmax = iou
-            sum_cov += ovmax
-            mean_weighted_cov += ovmax * ngt
+    if n_gt and n_pred:
+        ovmax_gt = iou.max(axis=0)                        # best pred per gt (>=0)
+        sum_cov = float(ovmax_gt.sum())
+        num_gt_pt = int(gsize.sum())
+        mean_weighted_cov = float((ovmax_gt * gsize).sum())
 
     return {
         'true_pos_sem': true_pos_sem,
@@ -127,10 +121,10 @@ def evaluate_scene(sem_pred, ins_pred, sem_gt, ins_gt,
         'tp': tp_list,
         'fp': fp_list,
         'iou_tp': iou_tp,
-        'sum_cov': sum_cov / max(len(pts_in_gt), 1) if pts_in_gt else 0,
-        'mean_wcov': mean_weighted_cov / max(num_gt_pt, 1) if pts_in_gt else 0,
-        'has_gt': len(pts_in_gt) > 0,
-        'has_pred': len(pts_in_pred) > 0,
+        'sum_cov': sum_cov / max(n_gt, 1) if n_gt else 0,
+        'mean_wcov': mean_weighted_cov / max(num_gt_pt, 1) if n_gt else 0,
+        'has_gt': n_gt > 0,
+        'has_pred': n_pred > 0,
     }
 
 

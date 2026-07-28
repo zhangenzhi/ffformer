@@ -88,13 +88,21 @@ class ForestFormer3D(nn.Module):
 
     # ──────────────────── Backbone ────────────────────
 
-    def extract_feat(self, x_sparse):
-        """Run sparse U-Net backbone. Returns List[(M_i, C)] per sample."""
+    def extract_feat(self, x_sparse, return_coarse=False):
+        """Run sparse U-Net backbone. Returns List[(M_i, C)] fine features per
+        sample. With return_coarse, also returns a coarser U-Net scale
+        (FF_COARSE_SCALE, default 2) for coarse-attention — the multi-scale
+        features are already computed (return_blocks=True), just surfaced."""
         x = self.input_conv(x_sparse)
-        x, _ = self.unet(x)
-        x = self.output_layer(x)
-        # Split by batch index
-        return [x.features[x.indices[:, 0] == i] for i in x.indices[:, 0].unique()]
+        out, prev = self.unet(x)                       # (finest, [scale0..scaleN])
+        fine_t = self.output_layer(out)
+        fine = [fine_t.features[fine_t.indices[:, 0] == i] for i in fine_t.indices[:, 0].unique()]
+        if not return_coarse:
+            return fine
+        scale = int(os.environ.get('FF_COARSE_SCALE', 2))
+        cp = prev[scale]
+        coarse = [cp.features[cp.indices[:, 0] == i] for i in cp.indices[:, 0].unique()]
+        return fine, coarse
 
     def collate(self, points_list):
         """Convert list of point tensors to SpConv sparse tensor.
@@ -174,6 +182,11 @@ class ForestFormer3D(nn.Module):
         if _dt in ('fp16', 'bf16') and getattr(self, '_dec_dtype', None) is None:
             self._dec_dtype = torch.float16 if _dt == 'fp16' else torch.bfloat16
             self.decoder.to(self._dec_dtype)
+        # FF_COARSE_ATTN=1 runs the iterative cross-attention over a coarse U-Net
+        # scale (FF_COARSE_SCALE, default 2) instead of the finest voxels, then
+        # projects the final mask back onto fine features — shrinks the O(Q·M)
+        # attention wall. Requires a decoder fine-tuned for it (untrained → garbage).
+        self._coarse_attn = os.environ.get('FF_COARSE_ATTN', '0') not in ('0', 'false', 'False')
         if os.environ.get('FF_COMPILE_DECODER', '0') not in ('0', 'false', 'False') \
                 and not getattr(self, '_dec_compiled', False):
             from .decoder import _ensure_triton_libcuda
@@ -262,8 +275,13 @@ class ForestFormer3D(nn.Module):
             # affects float matmul/conv; int/index ops and numpy accumulation are
             # untouched. Decoder outputs are cast back to fp32 before thresholding.
             with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
-                # ⑤ Backbone
-                x = self.extract_feat(x_sparse)
+                # ⑤ Backbone (optionally surface a coarse U-Net scale for
+                # coarse-attention — see _call_decoder / decoder x_coarse path)
+                if self._coarse_attn:
+                    x, x_coarse = self.extract_feat(x_sparse, return_coarse=True)
+                else:
+                    x = self.extract_feat(x_sparse)
+                    x_coarse = None
 
                 # ⑥ Aux heads
                 embed_logits = self.Embed(x[0])
@@ -290,7 +308,7 @@ class ForestFormer3D(nn.Module):
                     queries = [x[0][selected]]
 
                     # ⑨ Decoder
-                    x_dec = self._call_decoder(x, queries)
+                    x_dec = self._call_decoder(x, queries, x_coarse)
 
                     # ⑩ Predict masks + scores
                     masks, scores, sem_res = self._predict_by_feat(
@@ -366,16 +384,17 @@ class ForestFormer3D(nn.Module):
 
     # ──────────────────── Inference helpers ────────────────────
 
-    def _call_decoder(self, x, queries):
+    def _call_decoder(self, x, queries, x_coarse=None):
         """Run the decoder. With FF_DECODER_DTYPE (fp16/bf16) the params are that
         dtype and autocast is disabled so LN/softmax stay native (no fp32-promotion
         cast copies); inputs are cast to match. FF_COMPILE_DECODER wraps it in
-        torch.compile."""
+        torch.compile. x_coarse (coarse features) enables coarse-attention."""
         dt = getattr(self, '_dec_dtype', None)
         if dt is not None:
             with torch.autocast('cuda', enabled=False):
-                return self.decoder([xi.to(dt) for xi in x], [qi.to(dt) for qi in queries])
-        return self.decoder(x, queries)
+                xc = [c.to(dt) for c in x_coarse] if x_coarse is not None else None
+                return self.decoder([xi.to(dt) for xi in x], [qi.to(dt) for qi in queries], xc)
+        return self.decoder(x, queries, x_coarse)
 
     @staticmethod
     def _generate_regions(points, radius, step_size):

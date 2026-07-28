@@ -181,6 +181,14 @@ class QueryDecoder(nn.Module):
         self.x_mask = nn.Sequential(nn.Linear(in_channels, d_model), nn.ReLU(), nn.Linear(d_model, d_model))
         self.query_proj = nn.Sequential(nn.Linear(in_channels, d_model), nn.ReLU(), nn.Linear(d_model, d_model))
 
+        # Coarse-attention projections (optional): iterative cross-attn runs over a
+        # coarser U-Net scale (coarse_in_channels != in_channels) to shrink M; the
+        # final mask still projects the FINE features via self.x_mask. Only used
+        # when forward() receives x_coarse (needs fine-tuning to be meaningful).
+        coarse_in = kwargs.get('coarse_in_channels', 96)   # scale2 default (C=96)
+        self.input_proj_coarse = nn.Sequential(nn.Linear(coarse_in, d_model), nn.LayerNorm(d_model), nn.ReLU())
+        self.x_mask_coarse = nn.Sequential(nn.Linear(coarse_in, d_model), nn.ReLU(), nn.Linear(d_model, d_model))
+
         # Learnable semantic queries — in in_channels space (32), projected via query_proj
         self.num_semantic_queries = num_semantic_queries
         if num_semantic_queries > 0:
@@ -247,32 +255,39 @@ class QueryDecoder(nn.Module):
 
         return pred_scores, pred_masks, attn_masks
 
-    def forward(self, x, instance_queries):
+    def forward(self, x, instance_queries, x_coarse=None):
         """Forward pass with iterative mask prediction.
 
         Args:
-            x: List[(M_i, C)] backbone features per sample.
+            x: List[(M_i, C)] FINE backbone features per sample (for the final mask).
             instance_queries: List[(Q_i, C)] query features per sample.
+            x_coarse: optional List[(Mc_i, Cc)] COARSE features. If given, the
+                iterative cross-attention runs over the coarse scale (small M) and
+                only the final mask projects the fine features — cuts the O(Q·M)
+                wall. Needs fine-tuning (input_proj_coarse/x_mask_coarse untrained).
 
         Returns:
-            Dict with 'masks' (per-sample list of (Q_i+S, M_i)), 'scores'
-            (per-sample list of (Q_i+S, 1)), and 'aux_outputs'.
+            Dict with 'masks' (per-sample list of (Q_i+S, M_i)), 'scores', 'aux_outputs'.
         """
         B = len(x)
-        inst_feats_l = [self.input_proj(y) for y in x]
-        mask_feats_l = [self.x_mask(y) for y in x]
+        coarse = x_coarse is not None
+        src = x_coarse if coarse else x
+        inst_feats_l = [(self.input_proj_coarse if coarse else self.input_proj)(y) for y in src]
+        mask_feats_l = [(self.x_mask_coarse if coarse else self.x_mask)(y) for y in src]
         queries_l = self._get_queries(instance_queries, B)
 
-        inst_feats, src_pad, src_len = _pad_stack(inst_feats_l)   # (B,M,D)
-        mask_feats, _, _ = _pad_stack(mask_feats_l)               # (B,M,D)
+        inst_feats, src_pad, src_len = _pad_stack(inst_feats_l)   # attention scale (coarse or fine)
+        mask_feats, _, _ = _pad_stack(mask_feats_l)
         queries, qry_pad, qry_len = _pad_stack(queries_l)         # (B,Q,D)
 
-        def _unpad(masks_bt, scores_bt):
-            m = [masks_bt[i, :qry_len[i], :src_len[i]] for i in range(B)]
-            if scores_bt is None:
-                s = [None] * B
-            else:
-                s = [scores_bt[i, :qry_len[i]] for i in range(B)]
+        # Fine mask features for the final full-resolution mask (coarse mode only).
+        fine_len = None
+        if coarse:
+            fine_mask_feats, _, fine_len = _pad_stack([self.x_mask(y) for y in x])
+
+        def _unpad(masks_bt, scores_bt, lens):
+            m = [masks_bt[i, :qry_len[i], :lens[i]] for i in range(B)]
+            s = [None] * B if scores_bt is None else [scores_bt[i, :qry_len[i]] for i in range(B)]
             return m, s
 
         scores_all, masks_all = [], []
@@ -288,10 +303,17 @@ class QueryDecoder(nn.Module):
             scores_all.append(pred_score)
             masks_all.append(pred_mask)
 
-        final_masks, final_scores = _unpad(masks_all[-1], scores_all[-1])
-        aux_outputs = []
-        for j in range(len(masks_all) - 1):
-            m, s = _unpad(masks_all[j], scores_all[j])
-            aux_outputs.append({'masks': m, 'scores': s})
+        if coarse:
+            # Final mask at FINE resolution from the refined queries.
+            norm_q = self.out_norm(queries)                                       # (B,Q,D)
+            fine_bt = torch.einsum('bqd,bmd->bqm', norm_q, fine_mask_feats)        # (B,Q,Mfine)
+            final_masks, final_scores = _unpad(fine_bt, scores_all[-1], fine_len)
+            aux_outputs = []   # deep supervision omitted in coarse mode (aux masks are coarse)
+        else:
+            final_masks, final_scores = _unpad(masks_all[-1], scores_all[-1], src_len)
+            aux_outputs = []
+            for j in range(len(masks_all) - 1):
+                m, s = _unpad(masks_all[j], scores_all[j], src_len)
+                aux_outputs.append({'masks': m, 'scores': s})
 
         return dict(masks=final_masks, scores=final_scores, aux_outputs=aux_outputs)
