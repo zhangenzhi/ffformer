@@ -538,10 +538,13 @@ class ForestFormer3D(nn.Module):
                 feats_cat = torch.cat([p['feats'] for p in prepped], dim=0)
                 spatial = torch.stack([p['spatial'] for p in prepped]).max(0)[0]
                 x_sparse = spconv.SparseConvTensor(feats_cat, coords_cat, spatial, K)
-                x_list = self.extract_feat(x_sparse)   # list of K, aligned per batch idx
+                if self._coarse_attn:                   # surface coarse memory too
+                    x_list, xc_list = self.extract_feat(x_sparse, return_coarse=True)
+                else:
+                    x_list, xc_list = self.extract_feat(x_sparse), None
 
                 # ── Phase 3: per-region heads + query selection ──
-                x_for_dec, queries_for_dec = [], []
+                x_for_dec, queries_for_dec, xc_for_dec = [], [], []
                 for b, p in enumerate(prepped):
                     xb = x_list[b]
                     bi_logits = self.BiSemantic(xb)
@@ -560,11 +563,16 @@ class ForestFormer3D(nn.Module):
                         p['dec_j'] = len(x_for_dec)
                         x_for_dec.append(xb)
                         queries_for_dec.append(xb[p['selected']])
+                        if self._coarse_attn:
+                            xc_for_dec.append(xc_list[b])
                     else:
                         p['dec_j'] = None
 
                 # ── Phase 4: one batched decoder forward for the tree regions ──
-                x_dec = self._call_decoder(x_for_dec, queries_for_dec) if x_for_dec else None
+                x_dec = None
+                if x_for_dec:
+                    xc = xc_for_dec if self._coarse_attn else None
+                    x_dec = self._call_decoder(x_for_dec, queries_for_dec, xc)
 
             # ── Phase 5: per-region post-process (sequential, score-priority) ──
             for b, p in enumerate(prepped):
