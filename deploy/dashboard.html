@@ -601,9 +601,8 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <h4>Model</h4>
       <div class="config-row">
         <select id="modelSelect"><option value="">Loading...</option></select>
-        <button class="btn-sm" id="modelChangeBtn" onclick="switchModel()">Change</button>
       </div>
-      <div class="config-meta" id="modelMeta"></div>
+      <div class="config-meta" id="modelMeta">Model is applied per segmentation run.</div>
     </div>
     <div class="sidebar-hint" id="segmentHint">
       Pick a point cloud on the <b>&#x1F4E5; Data Import</b> page and hit "Send to Segment". This page shows live segmentation progress and the 3D result.
@@ -1699,16 +1698,11 @@ async function loadModels() {
       return;
     }
     sel.innerHTML = '';
-    let currentModel = null;
     for (const m of models) {
       const opt = document.createElement('option');
-      opt.value = m.path;
-      const sizeMB = (m.size / 1048576).toFixed(1);
-      opt.textContent = `${m.filename} (${sizeMB} MB)`;
-      if (m.current) {
-        opt.selected = true;
-        currentModel = m;
-      }
+      opt.value = m.name;
+      opt.textContent = m.label || m.name;
+      if (m.default) opt.selected = true;
       sel.appendChild(opt);
     }
     updateModelMeta();
@@ -1720,8 +1714,8 @@ async function loadModels() {
 
 function updateModelMeta() {
   const sel = document.getElementById('modelSelect');
-  const path = sel.value;
-  document.getElementById('modelMeta').textContent = path ? path : '';
+  const opt = sel.options[sel.selectedIndex];
+  document.getElementById('modelMeta').textContent = opt ? opt.textContent : '';
 }
 
 async function switchModel() {

@@ -164,7 +164,8 @@ def _generate_tile_preview(ply_path, offsets, preview_path):
     _save_result_ply(preview_path, xyz, sem, inst, scores)
 
 
-def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
+def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path,
+        native_ckpt=False):
     rep = StatusReporter(task_dir)
     suffix = os.path.splitext(input_path)[1].lower()
 
@@ -209,7 +210,8 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path):
         from deploy.inference_engine import ForestFormerEngine
         rep.log("Loading model...")
         engine = ForestFormerEngine(config_path=config_path,
-                                    checkpoint_path=checkpoint_path)
+                                    checkpoint_path=checkpoint_path,
+                                    native_ckpt=native_ckpt)
         rep.log("Model loaded")
 
         # ── Step 3: Inference ──
@@ -401,11 +403,23 @@ def main():
     p.add_argument('--tile-size', type=float, default=100)
     p.add_argument('--overlap', type=float, default=10)
     p.add_argument('--config', default=os.path.join(PROJECT_ROOT, 'configs', 'jpeaks_test.py'))
-    p.add_argument('--checkpoint', default=os.path.join(
-        PROJECT_ROOT, 'work_dirs', 'clean_forestformer', 'epoch_3000_fix.pth'))
+    p.add_argument('--checkpoint', default=None,
+                   help='override the model checkpoint (else resolved from --model)')
+    p.add_argument('--model', default='accurate',
+                   help='named model: accurate (fine) | fast (coarse-attn ~2-3x)')
     args = p.parse_args()
+
+    # Resolve the named model → checkpoint + runtime env (coarse/fp16/region-batch)
+    # + native-format flag. An explicit --checkpoint still wins for ad-hoc runs.
+    from deploy.inference_engine import resolve_model
+    mcfg = resolve_model(args.model)
+    os.environ.update(mcfg['env'])
+    checkpoint = args.checkpoint or mcfg['checkpoint']
+    native = mcfg['native'] and not args.checkpoint
+    print(f"[task] model={args.model} checkpoint={checkpoint} native={native} "
+          f"env={mcfg['env']}", flush=True)
     sys.exit(run(args.input, args.task_dir, args.tile_size, args.overlap,
-                 args.config, args.checkpoint))
+                 args.config, checkpoint, native_ckpt=native))
 
 
 if __name__ == '__main__':

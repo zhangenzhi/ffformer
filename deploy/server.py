@@ -937,17 +937,19 @@ def segment_dataset(ds_id: str, req: _SegmentRequest):
         raise HTTPException(404, "Dataset not found")
     d = dict(datasets[ds_id])
 
-    if req.model:
-        if not os.path.isfile(req.model):
-            raise HTTPException(404, f"Checkpoint not found: {req.model}")
-        os.environ['CHECKPOINT_PATH'] = req.model
+    # Named model selection (accurate | fast). Validated against the registry;
+    # the name is threaded to the HPC job which resolves checkpoint + runtime env.
+    from deploy.inference_engine import MODELS, DEFAULT_MODEL
+    model = req.model or DEFAULT_MODEL
+    if model not in MODELS:
+        raise HTTPException(400, f"Unknown model '{model}'. Options: {list(MODELS)}")
 
     task_id = str(uuid.uuid4())[:8]
     task_dir = os.path.join(RESULTS_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     tasks[task_id] = {
         'status': 'processing', 'step': 'queued', 'step_label': 'Queued on HPC',
-        'progress': 5, 'filename': d.get('filename', ds_id),
+        'progress': 5, 'filename': d.get('filename', ds_id), 'model': model,
         'dataset_id': ds_id, 'created': time.time(), 'updated': time.time(),
     }
 
@@ -962,7 +964,7 @@ def segment_dataset(ds_id: str, req: _SegmentRequest):
         proc = multiprocessing.Process(
             target=run_hpc_inference_prestaged,
             args=(tasks, task_id, ds_id, d.get('hpc_suffix', '.laz'),
-                  req.tile_size, req.overlap),
+                  req.tile_size, req.overlap, model),
             daemon=True)
     else:
         # Local backend: segment from the pod copy.
@@ -1287,41 +1289,13 @@ def list_tasks():
 
 @app.get("/models")
 def list_models():
-    """Scan for available model checkpoints (.pth files)."""
-    current_ckpt = os.environ.get('CHECKPOINT_PATH', '')
-    scan_dirs = [WORK_DIR, '/workspace/data/', '/weights/']
-    # Also scan the directory containing the current checkpoint
-    if current_ckpt:
-        ckpt_dir = os.path.dirname(current_ckpt)
-        if ckpt_dir and ckpt_dir not in scan_dirs:
-            scan_dirs.append(ckpt_dir)
-
-    models = []
-    seen = set()
-    for d in scan_dirs:
-        if not os.path.isdir(d):
-            continue
-        for root, dirs, files in os.walk(d):
-            for fname in files:
-                if fname.endswith('.pth'):
-                    fpath = os.path.join(root, fname)
-                    if fpath in seen:
-                        continue
-                    seen.add(fpath)
-                    try:
-                        stat = os.stat(fpath)
-                        models.append({
-                            'path': fpath,
-                            'filename': fname,
-                            'size': stat.st_size,
-                            'modified': stat.st_mtime,
-                            'current': (fpath == current_ckpt),
-                        })
-                    except OSError:
-                        pass
-
-    models.sort(key=lambda m: m['modified'], reverse=True)
-    return JSONResponse(models)
+    """Named models the backend can serve (resolved to checkpoint + runtime env
+    on the HPC side). The user picks one per segmentation."""
+    from deploy.inference_engine import MODELS, DEFAULT_MODEL
+    return JSONResponse([
+        {'name': name, 'label': cfg['label'], 'default': (name == DEFAULT_MODEL)}
+        for name, cfg in MODELS.items()
+    ])
 
 
 from pydantic import BaseModel as _BaseModel

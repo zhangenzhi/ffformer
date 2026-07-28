@@ -70,7 +70,7 @@ cd {workdir}
     python deploy/hpc_run_task.py \\
         --input /workspace/deploy_jobs/{jobdir}/input{suffix} \\
         --task-dir /workspace/deploy_jobs/{jobdir} \\
-        --tile-size {tile_size} --overlap {overlap}
+        --tile-size {tile_size} --overlap {overlap} --model {model}
 rc=$?
 
 # Bundle results into one compressed tar for a single fast SFTP download.
@@ -176,7 +176,8 @@ def _job_state(client, job_id):
 
 # --- Main entry (multiprocessing.Process target) ---
 
-def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overlap):
+def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overlap,
+                      model='accurate'):
     global tasks
     tasks = tasks_proxy
     t_start = time.time()
@@ -193,7 +194,7 @@ def run_hpc_inference(tasks_proxy, task_id, input_path, suffix, tile_size, overl
                                   log=lambda m: _log(task_id, t_start, m))
         _update(task_id, 'uploading', progress=6)
         _submit_poll_download(client, sftp, task_id, task_id, local_task_dir,
-                              t_start, hpc_suffix, tile_size, overlap)
+                              t_start, hpc_suffix, tile_size, overlap, model)
     except Exception as e:
         _log(task_id, t_start, f"ERROR: {e}")
         try:
@@ -237,7 +238,7 @@ def _stage_input(client, sftp, input_path, suffix, rdir, log=lambda m: None):
 
 
 def _submit_poll_download(client, sftp, task_id, jobdir, local_task_dir, t_start,
-                          hpc_suffix, tile_size, overlap):
+                          hpc_suffix, tile_size, overlap, model='accurate'):
     """Generate the PBS job over the input already in deploy_jobs/{jobdir},
     qsub it, stream progress/log/tiles, then download the result bundle."""
     rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', jobdir)
@@ -252,7 +253,7 @@ def _submit_poll_download(client, sftp, task_id, jobdir, local_task_dir, t_start
         queue=HPC_QUEUE, select=HPC_SELECT, walltime=HPC_WALLTIME,
         group=HPC_GROUP, workdir=HPC_WORKDIR, sif=HPC_SIF, rdir=rdir,
         jobdir=jobdir, task_id=task_id, suffix=hpc_suffix,
-        tile_size=tile_size, overlap=overlap,
+        tile_size=tile_size, overlap=overlap, model=model,
     )
     with sftp.open(posixpath.join(rdir, 'job.pbs'), 'w') as f:
         f.write(script)
@@ -489,7 +490,7 @@ def stage_to_hpc(datasets_proxy, dataset_id, input_path, suffix):
 
 
 def run_hpc_inference_prestaged(tasks_proxy, task_id, dataset_id, hpc_suffix,
-                                tile_size, overlap):
+                                tile_size, overlap, model='accurate'):
     """Segment a dataset already staged on the HPC — skips upload, qsub only."""
     global tasks
     tasks = tasks_proxy
@@ -504,7 +505,7 @@ def run_hpc_inference_prestaged(tasks_proxy, task_id, dataset_id, hpc_suffix,
         client = _connect()
         sftp = client.open_sftp()
         _submit_poll_download(client, sftp, task_id, dataset_id, local_task_dir,
-                              t_start, hpc_suffix, tile_size, overlap)
+                              t_start, hpc_suffix, tile_size, overlap, model)
     except Exception as e:
         _log(task_id, t_start, f"ERROR: {e}")
         try:

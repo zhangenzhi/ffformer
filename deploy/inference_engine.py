@@ -39,6 +39,32 @@ _DECODER_CFG = dict(
     d_model=256, num_heads=8, hidden_dim=1024, dropout=0.0,
     activation='gelu', fix_attention=True, objectness_flag=True, attn_mask=True)
 
+# Named models the backend can serve. `env` vars are read by model.predict() at
+# runtime (coarse-attention / fp16 / region-batch), so hpc_run_task sets them into
+# os.environ before building the engine. `native` = our own {'model':...} training
+# checkpoint (load_state_dict) vs the mm*-format checkpoint (load_pretrained).
+MODELS = {
+    'accurate': {
+        'checkpoint': os.path.join(PROJECT_ROOT, 'work_dirs', 'clean_forestformer', 'epoch_3000_fix.pth'),
+        'native': False,
+        'env': {},
+        'label': 'Accurate — baseline (fine attention)',
+    },
+    'fast': {
+        'checkpoint': os.path.join(PROJECT_ROOT, 'work_dirs', 'coarse_ft', 'epoch_600.pth'),
+        'native': True,
+        'env': {'FF_COARSE_ATTN': '1', 'FF_COARSE_SCALE': '2',
+                'FF_FP16_DECODER': '1', 'FF_REGION_BATCH': '8'},
+        'label': 'Fast — coarse attention (~2-3x, equal accuracy)',
+    },
+}
+DEFAULT_MODEL = 'accurate'
+
+
+def resolve_model(name):
+    """Return the MODELS entry for `name` (falls back to DEFAULT_MODEL)."""
+    return MODELS.get(name or DEFAULT_MODEL, MODELS[DEFAULT_MODEL])
+
 
 def _write_result_ply(path, xyz, semantic, instance, scores):
     """Write an ASCII PLY matching hpc_run_task's expected schema.
@@ -69,7 +95,8 @@ def _write_result_ply(path, xyz, semantic, instance, scores):
 class ForestFormerEngine:
     """Stateful inference engine backed by the pure-PyTorch ForestFormer3D."""
 
-    def __init__(self, config_path=None, checkpoint_path=None, device='cuda:0'):
+    def __init__(self, config_path=None, checkpoint_path=None, device='cuda:0',
+                 native_ckpt=False):
         # config_path kept for API compatibility with the old mm* engine; unused.
         if checkpoint_path is None:
             checkpoint_path = os.path.join(
@@ -77,6 +104,7 @@ class ForestFormerEngine:
         self.device = device
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
+        self.native_ckpt = native_ckpt   # our {'model':...} training ckpt vs mm* format
         self._model = None
 
     def _ensure_loaded(self):
@@ -89,8 +117,13 @@ class ForestFormerEngine:
 
         print(f'[Engine] Building pure ForestFormer3D')
         model = ForestFormer3D(decoder_cfg=_DECODER_CFG)
-        print(f'[Engine] Loading checkpoint: {self.checkpoint_path}')
-        load_pretrained(model, self.checkpoint_path)
+        print(f'[Engine] Loading checkpoint: {self.checkpoint_path} '
+              f'(native={self.native_ckpt})')
+        if self.native_ckpt:
+            ckpt = torch.load(self.checkpoint_path, map_location='cpu', weights_only=False)
+            model.load_state_dict(ckpt['model'] if 'model' in ckpt else ckpt)
+        else:
+            load_pretrained(model, self.checkpoint_path)
         n = sum(p.numel() for p in model.parameters())
         self._model = model.to(self.device).eval()
         print(f'[Engine] Model loaded on {self.device} ({n:,} params)')
