@@ -724,22 +724,32 @@ class ForestFormer3D(nn.Module):
             # Score-priority global update — entirely on GPU (was numpy indexing
             # with a .cpu() of best_score/best_mid every region).
             better = best_score > global_instance_scores[pc1_indices]  # (N1,) bool
-            if bool(better.any()):     # one sync per region (vs many before)
+            if bool(better.any()):     # tiny sync (~1% of 3_post)
                 gi = pc1_indices[better]
                 global_instance_scores[gi] = best_score[better].double()
                 all_pre_ins[gi] = max_instance + best_mid[better]
 
-                # best_masks feeds the final CPU merge. Transfer rows/cols once
-                # (not cols[rows==mid].cpu() per instance) and group in numpy.
-                winning = torch.unique(best_mid[better]).cpu().numpy()
-                rows_c = rows.cpu().numpy()
-                cols_c = cols.cpu().numpy()
-                pts_glob = pc1_indices.cpu().numpy()
+                # best_masks feeds the final CPU merge. The old path transferred
+                # ALL hits and scanned cols_c[rows_c==mid] per instance in Python —
+                # ~75% of 3_post (DtoH + O(n_win*n_hits) loop). Instead keep only
+                # winning-mask hits on GPU, map cols->global point ids, sort by mask
+                # id so each mask's points are contiguous, and split in one pass.
+                # Point order within a mask doesn't affect the merge (set ops), and
+                # masks are emitted in ascending id == the old torch.unique order.
+                winning = torch.unique(best_mid[better])
+                is_win = torch.zeros(masks_kept.shape[0], dtype=torch.bool, device=rows.device)
+                is_win[winning] = True
+                hw = is_win[rows]
+                order = torch.argsort(rows[hw])
+                wr_c = rows[hw][order].cpu().numpy()
+                wpts_c = pc1_indices[cols[hw]][order].cpu().numpy()
                 scores_kept_c = scores_kept.cpu().numpy()
-                for mid in winning:
-                    sel_pts = cols_c[rows_c == mid]
-                    best_masks.append((pts_glob[sel_pts], max_instance + int(mid),
-                                       float(scores_kept_c[int(mid)])))
+                if wr_c.size:
+                    bnd = np.flatnonzero(np.diff(wr_c)) + 1
+                    for pts_g, mid in zip(np.split(wpts_c, bnd),
+                                          wr_c[np.concatenate(([0], bnd))]):
+                        best_masks.append((pts_g, max_instance + int(mid),
+                                           float(scores_kept_c[int(mid)])))
 
         # Semantic voting (GPU)
         self._vote(votes_counter, region_ids, sem_res[nn_idx_pc1])
