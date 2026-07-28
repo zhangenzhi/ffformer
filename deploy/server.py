@@ -841,6 +841,15 @@ async def import_dataset(file: UploadFile = File(...)):
             raise HTTPException(502, f"HPC staging failed: {state['error']}")
         _dset(size=total, hpc_stage='ready', hpc_ready=True, hpc_progress=100,
               hpc_suffix=state.get('hpc_suffix', suffix))
+        # Persist metadata on the HPC so the dataset (name + format) is restorable
+        # after a server restart — the index is volatile, the HPC data is not.
+        try:
+            from deploy.hpc_backend import write_dataset_meta
+            write_dataset_meta(ds_id, {'filename': file.filename,
+                                       'format': suffix.lstrip('.'), 'size': total,
+                                       'created': datasets[ds_id]['created']})
+        except Exception as ex:
+            print(f'[import] meta write failed: {ex}', flush=True)
     else:
         with open(input_path, 'wb') as f:
             while True:
@@ -903,8 +912,42 @@ def import_status(ds_id: str):
     return JSONResponse(d)
 
 
+def _sync_datasets_from_hpc():
+    """Rebuild the in-memory dataset index from datasets persisted on the HPC.
+    The uploaded data lives on the HPC (deploy_jobs/<id>/input.*); only the index
+    was volatile, so a restart / redeploy lost visibility of prior uploads. Runs
+    once, lazily, on the first dataset listing."""
+    if INFERENCE_BACKEND != 'hpc' or getattr(_sync_datasets_from_hpc, '_done', False):
+        return
+    try:
+        _ensure_paramiko()
+        from deploy.hpc_backend import list_hpc_datasets
+        found = list_hpc_datasets()
+    except Exception as ex:
+        print(f'[sync] HPC dataset rebuild failed: {ex}', flush=True)
+        return
+    n = 0
+    for e in found:
+        ds_id = e['dataset_id']
+        if ds_id in datasets:
+            continue
+        datasets[ds_id] = {
+            'dataset_id': ds_id, 'filename': e.get('filename', ds_id),
+            'size': e.get('size', 0),
+            'format': e.get('format') or e.get('hpc_suffix', '.laz').lstrip('.'),
+            'hpc_stage': 'ready', 'hpc_ready': True, 'hpc_progress': 100,
+            'hpc_suffix': e.get('hpc_suffix', '.laz'),
+            'created': e.get('created', time.time()), 'updated': time.time(),
+            'restored': True,
+        }
+        n += 1
+    _sync_datasets_from_hpc._done = True
+    print(f'[sync] restored {n} datasets from HPC ({len(found)} on cluster)', flush=True)
+
+
 @app.get("/datasets")
 def list_datasets():
+    _sync_datasets_from_hpc()
     out = []
     for d in datasets.values():
         d = dict(d)

@@ -443,6 +443,60 @@ def list_hpc_data():
         client.close()
 
 
+def list_hpc_datasets():
+    """Rebuild the uploaded-dataset index from the HPC. Every
+    deploy_jobs/<id>/input.* is a dataset the user uploaded — the data persists on
+    the HPC even when the server's in-memory index is wiped (restart / redeploy).
+    One SSH round-trip emits: id|suffix|size|has_result|meta_json per dataset."""
+    base = posixpath.join(HPC_WORKDIR, 'deploy_jobs')
+    cmd = (
+        f"for f in $(find {base} -maxdepth 2 -name 'input.*' 2>/dev/null); do "
+        f"  d=$(dirname \"$f\"); id=$(basename \"$d\"); "
+        f"  sz=$(stat -c%s \"$f\" 2>/dev/null); "
+        f"  res=$([ -f \"$d/result.ply\" ] && echo 1 || echo 0); "
+        f"  meta=$(cat \"$d/meta.json\" 2>/dev/null | tr -d '\\n'); "
+        f"  echo \"$id|${{f##*.}}|$sz|$res|$meta\"; "
+        f"done")
+    client = _connect()
+    try:
+        rc, out, _ = _exec(client, cmd)
+        rows = []
+        for line in out.strip().splitlines():
+            parts = line.split('|', 4)
+            if len(parts) < 5:
+                continue
+            ds_id, ext, sz, res, meta = parts
+            entry = {'dataset_id': ds_id, 'hpc_suffix': '.' + ext.lower(),
+                     'size': int(sz) if sz.isdigit() else 0,
+                     'filename': f'{ds_id}.{ext.lower()}',
+                     'has_result': res == '1'}
+            if meta.strip():
+                try:
+                    entry.update(json.loads(meta))
+                except Exception:
+                    pass
+            rows.append(entry)
+        return rows
+    finally:
+        client.close()
+
+
+def write_dataset_meta(ds_id, meta):
+    """Persist dataset metadata (filename, format, created) next to the input on
+    the HPC so list_hpc_datasets can restore nice names after a restart."""
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', ds_id)
+    client = _connect()
+    try:
+        sftp = client.open_sftp()
+        _exec(client, f"mkdir -p {rdir}")
+        with sftp.open(posixpath.join(rdir, 'meta.json'), 'w') as f:
+            f.write(json.dumps(meta))
+    except Exception as e:
+        print(f"[hpc] write_dataset_meta({ds_id}) failed: {e}")
+    finally:
+        client.close()
+
+
 def stage_hpc_file(ds_id, src_path, suffix=None):
     """Turn an existing HPC file into a dataset by copying it into the dataset
     dir inside the HPC filesystem (instant, no transfer). Returns the suffix."""
