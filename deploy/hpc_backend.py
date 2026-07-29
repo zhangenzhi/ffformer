@@ -533,23 +533,47 @@ def fetch_result_bundle(task_id, local_dir):
     os.makedirs(local_dir, exist_ok=True)
     client = _connect()
     try:
-        # Prefer the prebuilt bundle; fall back to result.ply + stats + viewer.
-        rc, out, _ = _exec(client, f"test -f {rdir}/result_bundle.tar.gz && echo y || echo n")
+        import tarfile
         sftp = client.open_sftp()
+        # Prefer the prebuilt bundle (contains result.ply + stats + viewer).
+        rc, out, _ = _exec(client, f"test -f {rdir}/result_bundle.tar.gz && echo y || echo n")
         if out.strip().endswith('y'):
             local_tar = os.path.join(local_dir, 'result_bundle.tar.gz')
             sftp.get(posixpath.join(rdir, 'result_bundle.tar.gz'), local_tar)
-            import tarfile
             with tarfile.open(local_tar) as tf:
                 tf.extractall(local_dir)
             os.remove(local_tar)
-            return True
-        for fn in ('result.ply', 'stats.json', 'status.json'):
-            try:
-                sftp.get(posixpath.join(rdir, fn), os.path.join(local_dir, fn))
-            except Exception:
-                pass
-        return os.path.isfile(os.path.join(local_dir, 'result.ply'))
+        else:
+            # Individual files. Skip re-pulling the (possibly multi-GB) result.ply
+            # if it is already local (e.g. we only need to backfill the viewer).
+            for fn in ('result.ply', 'stats.json', 'status.json'):
+                lp = os.path.join(local_dir, fn)
+                if fn == 'result.ply' and os.path.isfile(lp):
+                    continue
+                try:
+                    sftp.get(posixpath.join(rdir, fn), lp)
+                except Exception:
+                    pass
+        # Ensure the streaming octree viewer is present — it is what lets large
+        # results be previewed online (without it the client falls back to loading
+        # the whole PLY and freezes). Pack it on the HPC and pull a single tar to
+        # avoid thousands of tiny tile transfers. No-op if there is no viewer/ dir.
+        if not os.path.isfile(os.path.join(local_dir, 'viewer', 'metadata.json')):
+            rc, out2, _ = _exec(
+                client,
+                f"cd {rdir} && test -d viewer && tar czf viewer_bundle.tar.gz viewer && echo y || echo n")
+            if out2.strip().endswith('y'):
+                local_vtar = os.path.join(local_dir, 'viewer_bundle.tar.gz')
+                try:
+                    sftp.get(posixpath.join(rdir, 'viewer_bundle.tar.gz'), local_vtar)
+                    with tarfile.open(local_vtar) as tf:
+                        tf.extractall(local_dir)
+                finally:
+                    if os.path.isfile(local_vtar):
+                        os.remove(local_vtar)
+                    _exec(client, f"rm -f {rdir}/viewer_bundle.tar.gz")
+        return (os.path.isfile(os.path.join(local_dir, 'result.ply')) or
+                os.path.isfile(os.path.join(local_dir, 'viewer', 'metadata.json')))
     finally:
         client.close()
 

@@ -979,8 +979,10 @@ def _ensure_result_local(tid):
     """A result restored from the HPC has no local files (pod /tmp was wiped). On
     first access, download+extract its bundle so the viewer/result endpoints work."""
     task_dir = os.path.join(RESULTS_DIR, tid)
-    if os.path.isfile(os.path.join(task_dir, 'result.ply')) or \
-       os.path.isfile(os.path.join(task_dir, 'viewer', 'metadata.json')):
+    # Ready once the streaming octree viewer is local (that's what the UI needs to
+    # render large results). If only result.ply is present but the viewer is not,
+    # fall through and re-fetch to backfill the viewer (fetch skips re-pulling ply).
+    if os.path.isfile(os.path.join(task_dir, 'viewer', 'metadata.json')):
         return
     t = tasks.get(tid)
     if INFERENCE_BACKEND != 'hpc' or not t or not t.get('restored'):

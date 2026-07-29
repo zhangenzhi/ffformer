@@ -1299,14 +1299,36 @@ async function selectTask(tid) {
       const meta = await metaResp.json();
       loadStreamingViewer(tid, meta);
     } else {
-      // Fallback: load PLY text (small files only)
-      const resp = await fetch(`${API}/result/${tid}/ply`);
-      const text = await resp.text();
-      loadPlyInViewer(text);
+      // No streaming octree for this result. Guard against loading a huge/binary
+      // PLY inline (reading GBs via resp.text() freezes the browser).
+      let sizeMB = 0;
+      try {
+        const head = await fetch(`${API}/result/${tid}/ply`, {method:'HEAD'});
+        sizeMB = (parseInt(head.headers.get('content-length')||'0',10))/1e6;
+      } catch(_) {}
+      const MAX_INLINE_MB = 80;
+      if (sizeMB > MAX_INLINE_MB) {
+        showViewerMessage('&#x1F4E6;',
+          `Result too large for inline preview (${sizeMB.toFixed(0)} MB) and no streaming viewer is available for it. Use <b>Download PLY</b> to inspect it locally.`);
+      } else {
+        const resp = await fetch(`${API}/result/${tid}/ply`);
+        const text = await resp.text();
+        loadPlyInViewer(text);
+      }
     }
   } catch(e) {
     console.error('Failed to load viewer:', e);
+    showViewerMessage('&#x26A0;&#xFE0F;', 'Failed to load this result for preview. Use Download PLY.');
   }
+}
+
+// Show a message in the viewer panel instead of a point cloud (e.g. result too large).
+function showViewerMessage(icon, html) {
+  const empty = document.getElementById('viewerEmpty');
+  empty.innerHTML = `<div class="big">${icon}</div><p>${html}</p>`;
+  empty.style.display = 'flex';
+  document.getElementById('viewer3d').style.display = 'none';
+  document.getElementById('viewerToolbar').style.display = 'none';
 }
 
 // ==================== 3D VIEWER ====================
@@ -1323,8 +1345,11 @@ function initViewer() {
   camera = new THREE.PerspectiveCamera(55, 1, 0.01, 10000);
   camera.up.set(0,0,1);
 
-  // Mouse controls on panel
+  // Mouse controls on panel. Ignore events from the overlay UI (toolbar sliders/
+  // selects, legend, info bar) so they don't get hijacked by camera drag/preventDefault.
+  const fromOverlay = e => e.target.closest('.viewer-toolbar, .viewer-legend, .info-bar');
   panel.addEventListener('mousedown', e => {
+    if(fromOverlay(e)) return;
     if(e.button===0) isDrag=true; if(e.button===2) isPan=true;
     lx=e.clientX; ly=e.clientY; e.preventDefault();
   });
@@ -1347,6 +1372,7 @@ function initViewer() {
   });
   document.addEventListener('mouseup', ()=>{isDrag=false;isPan=false;});
   panel.addEventListener('wheel', e => {
+    if(fromOverlay(e)) return;
     spherical.radius*=(1+e.deltaY*0.001);
     spherical.radius=Math.max(R*0.2,Math.min(R*20,spherical.radius));
     updateCam(); e.preventDefault();
@@ -1409,6 +1435,12 @@ function animate(t) {
 }
 
 function loadPlyInViewer(plyText) {
+  // Guard: this path only handles ASCII PLY. A binary PLY read via resp.text()
+  // is garbage bytes and would blow up parsing.
+  if (plyText.indexOf('format ascii') === -1) {
+    showViewerMessage('&#x1F4E6;', 'This result is a binary PLY with no streaming viewer. Use <b>Download PLY</b> to inspect it.');
+    return;
+  }
   // Parse PLY ASCII
   const lines = plyText.split('\n');
   let fields=[], nVerts=0, headerEnd=0;
@@ -1421,27 +1453,36 @@ function loadPlyInViewer(plyText) {
   const col={};
   fields.forEach((f,i)=>col[f]=i);
 
-  const pos=new Float32Array(nVerts*3);
-  const colors=new Float32Array(nVerts*3);
+  // Cap rendered points so the browser stays responsive; subsample uniformly.
+  const CAP = 2000000;
+  const stride = nVerts > CAP ? Math.ceil(nVerts / CAP) : 1;
+  const nOut = Math.ceil(nVerts / stride);
+
+  const pos=new Float32Array(nOut*3);
+  const colors=new Float32Array(nOut*3);
   const plyRows = [];
 
-  let cx=0,cy=0,cz=0;
-  for(let i=0;i<nVerts;i++){
-    const vals=lines[headerEnd+i].trim().split(/\s+/);
+  let cx=0,cy=0,cz=0, k=0;
+  for(let i=0;i<nVerts;i+=stride){
+    const row=lines[headerEnd+i];
+    if(!row) continue;
+    const vals=row.trim().split(/\s+/);
     const x=parseFloat(vals[col.x]), y=parseFloat(vals[col.y]), z=parseFloat(vals[col.z]);
-    pos[i*3]=x; pos[i*3+1]=y; pos[i*3+2]=z;
+    pos[k*3]=x; pos[k*3+1]=y; pos[k*3+2]=z;
     cx+=x; cy+=y; cz+=z;
     plyRows.push(vals);
+    k++;
   }
-  cx/=nVerts; cy/=nVerts; cz/=nVerts;
+  const nUsed=k||1;
+  cx/=nUsed; cy/=nUsed; cz/=nUsed;
   R=0;
-  for(let i=0;i<nVerts;i++){
+  for(let i=0;i<nUsed;i++){
     pos[i*3]-=cx; pos[i*3+1]-=cy; pos[i*3+2]-=cz;
     const dx=pos[i*3],dy=pos[i*3+1],dz=pos[i*3+2];
     R=Math.max(R,Math.sqrt(dx*dx+dy*dy+dz*dz));
   }
 
-  currentPlyData = {pos, plyRows, col, nVerts};
+  currentPlyData = {pos, plyRows, col, nVerts:nUsed};
 
   // Color by instance
   colorPoints(plyRows, col, colors, 'instance');
@@ -1450,8 +1491,8 @@ function loadPlyInViewer(plyText) {
   if(pointsMesh) scene.remove(pointsMesh);
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors,3));
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos.subarray(0,nUsed*3),3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors.subarray(0,nUsed*3),3));
 
   pointsMat = new THREE.PointsMaterial({
     size: R*0.01, vertexColors:true, sizeAttenuation:true
