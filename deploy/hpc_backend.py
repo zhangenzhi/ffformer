@@ -523,7 +523,7 @@ def list_hpc_results():
         client.close()
 
 
-def fetch_result_bundle(task_id, local_dir):
+def fetch_result_bundle(task_id, local_dir, want_ply=True):
     """Download + extract a finished task's result bundle from the HPC into
     local_dir, so the viewer/result endpoints (which read the pod filesystem) work
     for results restored after a restart. Returns True on success."""
@@ -544,9 +544,13 @@ def fetch_result_bundle(task_id, local_dir):
                 tf.extractall(local_dir)
             os.remove(local_tar)
         else:
-            # Individual files. Skip re-pulling the (possibly multi-GB) result.ply
-            # if it is already local (e.g. we only need to backfill the viewer).
-            for fn in ('result.ply', 'stats.json', 'status.json'):
+            # Individual files. The (possibly multi-GB) result.ply is only pulled
+            # when the caller needs it (download) — opening the streaming viewer
+            # needs just the octree below. Also skip it if already local.
+            fetch_files = ['stats.json', 'status.json']
+            if want_ply:
+                fetch_files = ['result.ply'] + fetch_files
+            for fn in fetch_files:
                 lp = os.path.join(local_dir, fn)
                 if fn == 'result.ply' and os.path.isfile(lp):
                     continue

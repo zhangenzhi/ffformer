@@ -975,14 +975,16 @@ def _sync_results_from_hpc():
     print(f'[sync] restored {n} results from HPC', flush=True)
 
 
-def _ensure_result_local(tid):
+def _ensure_result_local(tid, want_ply=False):
     """A result restored from the HPC has no local files (pod /tmp was wiped). On
     first access, download+extract its bundle so the viewer/result endpoints work."""
     task_dir = os.path.join(RESULTS_DIR, tid)
-    # Ready once the streaming octree viewer is local (that's what the UI needs to
-    # render large results). If only result.ply is present but the viewer is not,
-    # fall through and re-fetch to backfill the viewer (fetch skips re-pulling ply).
-    if os.path.isfile(os.path.join(task_dir, 'viewer', 'metadata.json')):
+    have_viewer = os.path.isfile(os.path.join(task_dir, 'viewer', 'metadata.json'))
+    have_ply = os.path.isfile(os.path.join(task_dir, 'result.ply'))
+    # Ready once the artifacts this request needs are local: the streaming octree
+    # viewer always, plus result.ply only when explicitly requested (download).
+    # This lets opening the viewer pull just the ~150MB octree, not the multi-GB PLY.
+    if have_viewer and (have_ply or not want_ply):
         return
     t = tasks.get(tid)
     if INFERENCE_BACKEND != 'hpc' or not t or not t.get('restored'):
@@ -990,7 +992,7 @@ def _ensure_result_local(tid):
     try:
         _ensure_paramiko()
         from deploy.hpc_backend import fetch_result_bundle
-        fetch_result_bundle(tid, task_dir)
+        fetch_result_bundle(tid, task_dir, want_ply=want_ply)
     except Exception as ex:
         print(f'[result] fetch for {tid} failed: {ex}', flush=True)
 
@@ -1291,7 +1293,7 @@ def viewer_tile(task_id: str, node_key: str):
 @app.get("/result/{task_id}/ply")
 def download_ply(task_id: str):
     """Download/stream result PLY file as text (for viewer) or binary."""
-    _ensure_result_local(task_id)
+    _ensure_result_local(task_id, want_ply=True)
     if task_id not in tasks:
         raise HTTPException(404, "Task not found")
     task = tasks[task_id]
