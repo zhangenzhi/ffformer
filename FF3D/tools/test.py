@@ -34,6 +34,8 @@ def main():
     parser.add_argument('--data-root', required=True, help='ForAINetV2 data root')
     parser.add_argument('--split', default='test', choices=['test', 'val'])
     parser.add_argument('--output-dir', default=None, help='Save PLY results (optional)')
+    parser.add_argument('--invariant-feat', action='store_true',
+                        help='Use translation-invariant input feature (height above ground, xy=0) — must match training')
     parser.add_argument('--native-ckpt', action='store_true',
                         help='Checkpoint is from our training (not original mm* format)')
     args = parser.parse_args()
@@ -53,8 +55,13 @@ def main():
     else:
         load_pretrained(model, args.checkpoint)
 
+    if args.invariant_feat:
+        model._invariant_feat = True
+
     model = model.cuda().eval()
-    print(f"Model loaded from {args.checkpoint}")
+    print(f"Model loaded from {args.checkpoint}"
+          + ("  [invariant-feat]" if args.invariant_feat else "")
+          + ("  [coarse-attn]" if os.environ.get('FF_COARSE_ATTN', '0') not in ('0', 'false', 'False') else ""))
 
     # Find test scenes
     split_file = os.path.join(args.data_root, 'meta_data', f'{args.split}_list.txt')

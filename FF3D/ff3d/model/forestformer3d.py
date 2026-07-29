@@ -124,14 +124,25 @@ class ForestFormer3D(nn.Module):
         all_feats = []    # (N_i, 3) centered xyz
         offsets = [0]      # cumulative point count per sample
 
+        invariant = getattr(self, '_invariant_feat', False)
         for batch_idx, p in enumerate(points_list):
             # Normalize to voxel coordinates
             coords = torch.floor((p[:, :3] - p[:, :3].min(0)[0]) / self.voxel_size).int()
             # Add batch index as first column
             batch_col = torch.full((len(p), 1), batch_idx, dtype=torch.int32, device=p.device)
             all_coords.append(torch.cat([batch_col, coords], dim=1))
-            # Features = centered xyz
-            all_feats.append(p[:, :3] - p[:, :3].mean(0))
+            if invariant:
+                # Translation-invariant feature (approach B): height above the
+                # crop's ground (z - z_min), xy zeroed. Makes backbone features
+                # independent of tile size/position → a voxel's features are the
+                # same whether the backbone ran on a 28m scene or a 100m tile, so
+                # the shared-backbone/sliced-window inference is consistent.
+                f = torch.zeros_like(p[:, :3])
+                f[:, 2] = p[:, 2] - p[:, 2].min()
+                all_feats.append(f)
+            else:
+                # Features = crop-centered xyz (original)
+                all_feats.append(p[:, :3] - p[:, :3].mean(0))
             offsets.append(offsets[-1] + len(p))
 
         coords_cat = torch.cat(all_coords, dim=0)  # (N_total, 4)

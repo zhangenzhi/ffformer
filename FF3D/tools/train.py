@@ -270,6 +270,9 @@ def main():
                         help='load model weights only (fresh optimizer) — for fine-tuning')
     parser.add_argument('--freeze-backbone', action='store_true',
                         help='freeze backbone + aux heads; train the decoder only')
+    parser.add_argument('--invariant-feat', action='store_true',
+                        help='approach B: translation-invariant input (height above '
+                             'ground), so the backbone is tile-size independent')
     args = parser.parse_args()
     os.environ['FF_COARSE_SCALE'] = str(args.coarse_scale)
 
@@ -285,6 +288,7 @@ def main():
             activation='gelu', fix_attention=True, objectness_flag=True, attn_mask=True)
     ).to(device)
     model._coarse_attn = args.coarse_attn
+    model._invariant_feat = args.invariant_feat
 
     # Fine-tuning init: load pretrained weights only (fresh optimizer/scheduler).
     # load_pretrained handles the spconv weight permutation + tolerates the new
@@ -327,10 +331,22 @@ def main():
         ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
-        if 'scheduler' in ckpt:
-            scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch = ckpt['epoch']
-        print(f"Resumed from epoch {start_epoch}")
+        # Smooth continuation past the original run's end (where poly LR had decayed
+        # to 0). PolynomialLR is *multiplicative*, so it can't be fast-forwarded by
+        # last_epoch — instead set the optimizer LR to the closed-form poly value at
+        # the resume point, then start a fresh poly over the REMAINING iters that
+        # decays it to 0 at --epochs. base_lr from the optimizer's preserved initial_lr.
+        base_lr = optimizer.param_groups[0].get('initial_lr', args.lr)
+        done_iters = start_epoch * len(train_loader)
+        resume_lr = base_lr * (1 - done_iters / total_iters) ** 0.9
+        for g in optimizer.param_groups:
+            g['lr'] = resume_lr
+            g['initial_lr'] = resume_lr
+        scheduler = torch.optim.lr_scheduler.PolynomialLR(
+            optimizer, total_iters=total_iters - done_iters, power=0.9)
+        print(f"Resumed from epoch {start_epoch}  (base_lr {base_lr:.2e} → lr now "
+              f"{resume_lr:.2e}, decaying to 0 at epoch {args.epochs})")
 
     print(f"Training: {len(train_set)} samples, {len(train_loader)} iters/epoch, "
           f"batch_size={args.batch_size}")
