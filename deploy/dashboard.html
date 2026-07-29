@@ -1636,48 +1636,6 @@ function _parseTileFast(buf) {
   return {p, c, n};
 }
 
-// Parse pool: run the parse in a small Worker pool (parallel, off the main thread)
-// so a large streaming result stays responsive. Robust by construction — a worker
-// error or a slow/lost message falls back to a main-thread parse, so a tile never
-// hangs (which would pin streamLoading and stall all further loading).
-let _tileWorkers = null, _tileRR = 0, _tileJobs = new Map(), _tileJobSeq = 0, _workersOk = true;
-function _parseTile(buf) {
-  if (_workersOk && !_tileWorkers) {
-    try {
-      const src = `self.onmessage=function(e){` +
-        `var buf=e.data.buf,jid=e.data.jid,S=e.data.S,fs=S/4;` +
-        `var n=Math.floor(buf.byteLength/S),f=new Float32Array(buf),u=new Uint8Array(buf);` +
-        `var p=new Float32Array(n*3),c=new Float32Array(n*3);` +
-        `for(var i=0;i<n;i++){p[i*3]=f[i*fs];p[i*3+1]=f[i*fs+1];p[i*3+2]=f[i*fs+2];` +
-        `var b=i*S;c[i*3]=u[b+12]/255;c[i*3+1]=u[b+13]/255;c[i*3+2]=u[b+14]/255;}` +
-        `self.postMessage({jid:jid,p:p,c:c,n:n},[p.buffer,c.buffer]);};`;
-      const url = URL.createObjectURL(new Blob([src], {type:'application/javascript'}));
-      const N = Math.max(2, Math.min(6, navigator.hardwareConcurrency || 4));
-      _tileWorkers = [];
-      for (let i = 0; i < N; i++) {
-        const w = new Worker(url);
-        w.onmessage = (e) => { const r = _tileJobs.get(e.data.jid);
-          if (r) { _tileJobs.delete(e.data.jid); r(e.data); } };
-        w.onerror = () => { _workersOk = false; };
-        _tileWorkers.push(w);
-      }
-    } catch(e) { _workersOk = false; }
-  }
-  if (!_workersOk || !_tileWorkers || !_tileWorkers.length) {
-    return Promise.resolve(_parseTileFast(buf));
-  }
-  return new Promise((resolve) => {
-    const jid = ++_tileJobSeq;
-    let done = false;
-    const finish = (r) => { if (!done) { done = true; _tileJobs.delete(jid); resolve(r); } };
-    _tileJobs.set(jid, finish);
-    // Fallback if the worker doesn't answer (error / lost message): parse on the
-    // main thread. buf is NOT transferred, so it stays valid here.
-    setTimeout(() => finish(_parseTileFast(buf)), 4000);
-    _tileWorkers[_tileRR++ % _tileWorkers.length].postMessage({buf, jid, S: STREAM_POINT_SIZE});
-  });
-}
-
 async function loadStreamNode(key) {
   if (streamNodes[key] || streamLoading.has(key)) return;
   if (!streamMeta.nodes[key]) return;
@@ -1690,7 +1648,7 @@ async function loadStreamNode(key) {
     const buf = await resp.arrayBuffer();
     if (buf.byteLength < STREAM_POINT_SIZE) return;
 
-    const { p: positions, c: colors, n } = await _parseTile(buf);
+    const { p: positions, c: colors, n } = _parseTileFast(buf);
     // The user may have switched results while this tile was fetching/parsing.
     if (n === 0 || streamTaskId !== myTask || !streamMeta || streamNodes[key]) return;
 
