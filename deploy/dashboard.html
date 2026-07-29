@@ -1426,7 +1426,10 @@ function updateCam() {
 let _lastStreamLOD = 0;
 function animate(t) {
   requestAnimationFrame(animate);
-  // Update streaming LOD every 150ms
+  // Only drive the 3D viewer when its page is visible. On the Analysis page the
+  // canvas is CSS-hidden but WebGL would still render millions of points every
+  // frame off-screen — a constant GPU drain that can crash a weak GPU / reboot.
+  if (currentPage === 'analyze') return;
   if (streamMeta && t - _lastStreamLOD > 150) {
     updateStreamLOD();
     _lastStreamLOD = t;
@@ -1555,9 +1558,10 @@ let streamVisiblePts = 0;
 let streamOctreeTotal = 0;   // total points actually in the octree (a subsample of
                              // the original scan) — the honest denominator for "loaded".
 const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
-const STREAM_MAX_CONCURRENT = 12;
-const STREAM_SCREEN_THRESHOLD = 18;  // lower = load finer tiles (fuller cloud) at a given zoom
-const FFVIEWER_BUILD = '2026-07-29e';
+const STREAM_MAX_CONCURRENT = 8;
+const STREAM_SCREEN_THRESHOLD = 60;  // lower = finer tiles; kept conservative to bound GPU load
+const STREAM_MAX_RENDER_PTS = 10_000_000;  // hard cap on rendered points — safety for weak GPUs
+const FFVIEWER_BUILD = '2026-07-29f';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
@@ -1724,10 +1728,13 @@ function updateStreamLOD() {
     }
   }
 
-  // Load with priority (largest screen size first)
+  // Load with priority (largest screen size first), but stop once we hit the
+  // render-point cap — bounds GPU memory so a large octree can't crash a weak GPU.
   toLoad.sort((a, b) => streamNodeScreenSize(b) - streamNodeScreenSize(a));
   const budget = STREAM_MAX_CONCURRENT - streamLoading.size;
-  for (let i = 0; i < Math.min(budget, toLoad.length); i++) loadStreamNode(toLoad[i]);
+  if (streamVisiblePts < STREAM_MAX_RENDER_PTS) {
+    for (let i = 0; i < Math.min(budget, toLoad.length); i++) loadStreamNode(toLoad[i]);
+  }
 
   // Update info bar
   const loaded = Object.keys(streamNodes).length;
