@@ -1552,10 +1552,12 @@ let streamLoading = new Set();
 let streamMeta = null;
 let streamTaskId = null;
 let streamVisiblePts = 0;
+let streamOctreeTotal = 0;   // total points actually in the octree (a subsample of
+                             // the original scan) — the honest denominator for "loaded".
 const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
 const STREAM_MAX_CONCURRENT = 12;
 const STREAM_SCREEN_THRESHOLD = 18;  // lower = load finer tiles (fuller cloud) at a given zoom
-const FFVIEWER_BUILD = '2026-07-29d';
+const FFVIEWER_BUILD = '2026-07-29e';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
@@ -1578,6 +1580,7 @@ function loadStreamingViewer(taskId, meta) {
 
   streamMeta = meta;
   streamTaskId = taskId;
+  streamOctreeTotal = Object.values(meta.nodes || {}).reduce((s, n) => s + (n.count || 0), 0);
 
   const bMin = meta.bbox_min;
   const bSize = meta.bbox_size;
@@ -1729,8 +1732,13 @@ function updateStreamLOD() {
   // Update info bar
   const loaded = Object.keys(streamNodes).length;
   const total = Object.keys(nodes).length;
+  // Show loaded / octree-total (the viewer holds a subsample of the full scan), so a
+  // fully-loaded view reads as complete instead of a misleading fraction of the scan.
+  const denom = streamOctreeTotal || streamMeta.total_points;
+  const full = streamVisiblePts >= denom;
   document.getElementById('infoPoints').textContent =
-    streamVisiblePts.toLocaleString() + ' / ' + streamMeta.total_points.toLocaleString() + ' points';
+    full ? `${denom.toLocaleString()} pts · ${(streamMeta.total_points||0).toLocaleString()} scanned`
+         : `${streamVisiblePts.toLocaleString()} / ${denom.toLocaleString()} pts loaded`;
 }
 
 // ==================== MODEL MANAGEMENT ====================
