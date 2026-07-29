@@ -1553,8 +1553,11 @@ let streamMeta = null;
 let streamTaskId = null;
 let streamVisiblePts = 0;
 const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
-const STREAM_MAX_CONCURRENT = 8;
-const STREAM_SCREEN_THRESHOLD = 60;
+const STREAM_MAX_CONCURRENT = 12;
+const STREAM_SCREEN_THRESHOLD = 18;  // lower = load finer tiles (fuller cloud) at a given zoom
+const FFVIEWER_BUILD = '2026-07-29d';
+console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
+            'color:#2ea043;font-weight:bold');
 
 function clearStreamViewer() {
   for (const key of Object.keys(streamNodes)) {
