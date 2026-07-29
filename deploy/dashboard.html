@@ -2534,6 +2534,10 @@ async function refreshMediaLibrary() {
       if (!d.hpc_ready) continue;
       const id = 'dataset:' + d.dataset_id;
       if (mediaItems.some(m => m.id === id)) continue;
+      // If this dataset has already been segmented, its result (task) card already
+      // represents it — don't also show the raw dataset, or the same job appears
+      // twice (processed + original).
+      if (mediaItems.some(m => m.source === 'task' && m.taskId === d.dataset_id)) continue;
       mediaItems.push({ id, source:'dataset', dataset_id:d.dataset_id,
         name:d.filename || d.dataset_id,
         format:(d.format || d.hpc_suffix || '').replace('.', ''),
