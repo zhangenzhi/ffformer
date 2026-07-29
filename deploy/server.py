@@ -1292,14 +1292,16 @@ def viewer_tile(task_id: str, node_key: str):
 
 @app.get("/result/{task_id}/ply")
 def download_ply(task_id: str):
-    """Download/stream result PLY file as text (for viewer) or binary."""
-    _ensure_result_local(task_id, want_ply=True)
+    """Download the result PLY. Served from the local (persistent) file whenever it
+    exists — independent of the in-memory task index, which is empty right after a
+    restart until /tasks re-syncs (that emptiness caused a spurious 404 on download)."""
+    if '/' in task_id or '..' in task_id:
+        raise HTTPException(400, "Invalid task id")
     if task_id not in tasks:
-        raise HTTPException(404, "Task not found")
-    task = tasks[task_id]
-    if task['status'] != 'completed':
-        raise HTTPException(400, f"Task status: {task['status']}")
-    ply = task.get('result_ply') or os.path.join(RESULTS_DIR, task_id, 'result.ply')
+        _sync_results_from_hpc()      # repopulate restored tasks after a restart
+    _ensure_result_local(task_id, want_ply=True)
+    task = tasks.get(task_id)
+    ply = (task.get('result_ply') if task else None) or os.path.join(RESULTS_DIR, task_id, 'result.ply')
     if not os.path.isfile(ply):
         raise HTTPException(404, "Result PLY not found")
     return FileResponse(ply, media_type='application/octet-stream',
@@ -1308,16 +1310,26 @@ def download_ply(task_id: str):
 
 @app.get("/result/{task_id}/json")
 def download_json(task_id: str):
-    """Get result as JSON (stats + per-point predictions)."""
+    """Get result stats as JSON. File-backed (stats.json) so it survives a restart
+    even before the in-memory task index is re-synced."""
+    if '/' in task_id or '..' in task_id:
+        raise HTTPException(400, "Invalid task id")
     if task_id not in tasks:
-        raise HTTPException(404, "Task not found")
-    task = tasks[task_id]
-    if task['status'] != 'completed':
-        raise HTTPException(400, f"Task status: {task['status']}")
-    return JSONResponse({
-        'task_id': task_id,
-        'stats': task.get('stats', {}),
-    })
+        _sync_results_from_hpc()
+    _ensure_result_local(task_id)
+    task = tasks.get(task_id)
+    stats = task.get('stats') if task else None
+    if stats is None:
+        sp = os.path.join(RESULTS_DIR, task_id, 'stats.json')
+        if os.path.isfile(sp):
+            try:
+                with open(sp) as f:
+                    stats = json.load(f)
+            except Exception:
+                stats = {}
+        else:
+            raise HTTPException(404, "No result for this task")
+    return JSONResponse({'task_id': task_id, 'stats': stats or {}})
 
 
 @app.get("/result/{task_id}/trees")
