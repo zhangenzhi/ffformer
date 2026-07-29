@@ -2534,10 +2534,17 @@ async function refreshMediaLibrary() {
       if (!d.hpc_ready) continue;
       const id = 'dataset:' + d.dataset_id;
       if (mediaItems.some(m => m.id === id)) continue;
-      // If this dataset has already been segmented, its result (task) card already
-      // represents it — don't also show the raw dataset, or the same job appears
-      // twice (processed + original).
-      if (mediaItems.some(m => m.source === 'task' && m.taskId === d.dataset_id)) continue;
+      // If this dataset has already been segmented, merge it into its result (task)
+      // card instead of showing the same job twice — the merged card both views the
+      // result and keeps the dataset_id so it can be re-segmented with another model.
+      const taskItem = mediaItems.find(m => m.source === 'task' && m.taskId === d.dataset_id);
+      if (taskItem) {
+        taskItem.dataset_id = d.dataset_id;
+        taskItem.hpc_ready = true;
+        if (!taskItem.format) taskItem.format = (d.format || d.hpc_suffix || '').replace('.', '');
+        if (d.size && !taskItem.size) taskItem.size = d.size;
+        continue;
+      }
       mediaItems.push({ id, source:'dataset', dataset_id:d.dataset_id,
         name:d.filename || d.dataset_id,
         format:(d.format || d.hpc_suffix || '').replace('.', ''),
@@ -2648,6 +2655,11 @@ function renderMediaInspector() {
   let action;
   if (m.source === 'task') {
     action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">View Result &amp; Analysis</button>`;
+    // Merged card: this processed job still has its source dataset on the HPC, so
+    // offer re-segmentation (e.g. with another model) without a re-upload.
+    if (m.dataset_id) {
+      action += `<button class="btn btn-secondary" style="margin-top:8px" onclick="sendToSegment('${m.id.replace(/'/g,"\\'")}')">&#x1F332; Re-segment (another model)</button>`;
+    }
   } else if (m.hpc_stage === 'failed') {
     action = `<div style="color:var(--red);font-size:12px;margin-top:8px">Import failed: ${m.error||'unknown'}</div>`;
   } else if (m.hpc_ready || m.source === 'server') {
@@ -2656,8 +2668,8 @@ function renderMediaInspector() {
     const lbl = m.hpc_stage === 'uploading' ? `Uploading ${m.upload_progress||0}%` : 'Staging to HPC…';
     action = `<button class="btn btn-primary" disabled><span class="spin"></span> ${lbl}</button>`;
   }
-  // Uploaded datasets can be deleted from the HPC.
-  if (m.source === 'dataset' && m.dataset_id) {
+  // Any item backed by an HPC dataset (raw or merged/processed) can be deleted.
+  if (m.dataset_id) {
     action += `<button class="btn btn-secondary" style="margin-top:8px" onclick="deleteDatasetUI('${m.dataset_id}')">&#x1F5D1; Delete dataset</button>`;
   }
   const sub = m.source==='task' ? 'Completed task'
