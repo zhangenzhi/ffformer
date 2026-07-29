@@ -1623,31 +1623,54 @@ function streamNodeScreenSize(key) {
   return (bb.size / dist) * renderer.domElement.height / (2 * Math.tan(fov/2));
 }
 
+// Tile-parse worker pool: octree tiles are 16 B/point (xyz float32 + rgb u8 + pad),
+// 4-float aligned, so they parse fast with typed-array views. Doing it in workers
+// keeps parsing parallel and OFF the main thread — a large streaming result no
+// longer freezes the UI while tiles decode.
+let _tileWorkers = null, _tileRR = 0, _tileJobs = new Map(), _tileJobSeq = 0;
+function _parseTileInWorker(buf) {
+  if (!_tileWorkers) {
+    const src = `self.onmessage=function(e){` +
+      `var buf=e.data.buf,jid=e.data.jid,S=e.data.S,fs=S/4;` +
+      `var n=buf.byteLength/S,f=new Float32Array(buf),u=new Uint8Array(buf);` +
+      `var p=new Float32Array(n*3),c=new Float32Array(n*3);` +
+      `for(var i=0;i<n;i++){p[i*3]=f[i*fs];p[i*3+1]=f[i*fs+1];p[i*3+2]=f[i*fs+2];` +
+      `var b=i*S;c[i*3]=u[b+12]/255;c[i*3+1]=u[b+13]/255;c[i*3+2]=u[b+14]/255;}` +
+      `self.postMessage({jid:jid,p:p,c:c,n:n},[p.buffer,c.buffer]);};`;
+    const url = URL.createObjectURL(new Blob([src], {type:'application/javascript'}));
+    const N = Math.max(2, Math.min(6, navigator.hardwareConcurrency || 4));
+    _tileWorkers = [];
+    for (let i = 0; i < N; i++) {
+      const w = new Worker(url);
+      w.onmessage = (e) => { const r = _tileJobs.get(e.data.jid);
+        if (r) { _tileJobs.delete(e.data.jid); r(e.data); } };
+      _tileWorkers.push(w);
+    }
+  }
+  return new Promise((resolve) => {
+    const jid = ++_tileJobSeq;
+    _tileJobs.set(jid, resolve);
+    _tileWorkers[_tileRR++ % _tileWorkers.length].postMessage(
+      {buf, jid, S: STREAM_POINT_SIZE}, [buf]);
+  });
+}
+
 async function loadStreamNode(key) {
   if (streamNodes[key] || streamLoading.has(key)) return;
   if (!streamMeta.nodes[key]) return;
   streamLoading.add(key);
 
   try {
+    const myTask = streamTaskId;
     const resp = await fetch(`${API}/viewer/${streamTaskId}/tiles/${key}.bin`);
     if (!resp.ok) { streamLoading.delete(key); return; }
     const buf = await resp.arrayBuffer();
-    const arr = new Uint8Array(buf);
-    const n = arr.length / STREAM_POINT_SIZE;
-    if (n === 0) { streamLoading.delete(key); return; }
+    if (buf.byteLength < STREAM_POINT_SIZE) { streamLoading.delete(key); return; }
 
-    const dv = new DataView(buf);
-    const positions = new Float32Array(n * 3);
-    const colors = new Float32Array(n * 3);
-
-    for (let i = 0; i < n; i++) {
-      const o = i * STREAM_POINT_SIZE;
-      positions[i*3]   = dv.getFloat32(o, true);
-      positions[i*3+1] = dv.getFloat32(o+4, true);
-      positions[i*3+2] = dv.getFloat32(o+8, true);
-      colors[i*3]   = arr[o+12] / 255;
-      colors[i*3+1] = arr[o+13] / 255;
-      colors[i*3+2] = arr[o+14] / 255;
+    const { p: positions, c: colors, n } = await _parseTileInWorker(buf);
+    // The user may have switched results while this tile was fetching/parsing.
+    if (n === 0 || streamTaskId !== myTask || !streamMeta || streamNodes[key]) {
+      streamLoading.delete(key); return;
     }
 
     const geo = new THREE.BufferGeometry();
