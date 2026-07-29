@@ -87,36 +87,54 @@ def compute_tree_metrics(ply_path, cache_path=None):
     ground_z = float(np.median(xyz[ground_mask, 2])) if ground_mask.any() else float(xyz[:, 2].min())
 
     trees = []
-    tree_ids = np.unique(inst[inst >= 0])
-    for tid in tree_ids:
-        m = inst == tid
-        n = int(m.sum())
-        if n < 10:
-            continue
-        pts = xyz[m]
-        s = sem[m]
-        z_base, z_top = float(pts[:, 2].min()), float(pts[:, 2].max())
-        height = z_top - z_base
-        dx = float(pts[:, 0].max() - pts[:, 0].min())
-        dy = float(pts[:, 1].max() - pts[:, 1].min())
-        crown_width = max(dx, dy)
-        wood_n = int((s == WOOD).sum())
-        leaf_n = int((s == LEAF).sum())
-        trees.append({
-            'id': int(tid),
-            'n_points': n,
-            'height_m': round(z_top - ground_z, 2),   # height above ground
-            'trunk_height_m': round(height, 2),         # extent of the instance
-            'crown_width_m': round(crown_width, 2),
-            'crown_ratio': round(crown_width / height, 2) if height > 0.1 else None,
-            'wood_points': wood_n,
-            'leaf_points': leaf_n,
-            'leaf_wood_ratio': round(leaf_n / wood_n, 2) if wood_n > 0 else None,
-            'mean_score': round(float(score[m].mean()), 3),
-            'center_x': round(float(pts[:, 0].mean()), 2),
-            'center_y': round(float(pts[:, 1].mean()), 2),
-            'base_z': round(z_base, 2),
-        })
+    valid = inst >= 0
+    if valid.any():
+        # A single sort groups every tree's points contiguously, then each per-tree
+        # statistic is one vectorized segment-reduction (reduceat) — O(N log N)
+        # instead of an O(n_trees x N) boolean-mask scan per tree (which was reading
+        # all ~150M points ~5000 times). Output is identical.
+        inst_v = inst[valid]
+        xv, yv, zv = xyz[valid, 0], xyz[valid, 1], xyz[valid, 2]
+        sem_v = sem[valid]
+        score_v = score[valid].astype(np.float64)
+
+        order = np.argsort(inst_v, kind='stable')
+        inst_s = inst_v[order]
+        xs, ys, zs = xv[order], yv[order], zv[order]
+        sem_s, score_s = sem_v[order], score_v[order]
+
+        uniq, starts, counts = np.unique(inst_s, return_index=True, return_counts=True)
+        zmin = np.minimum.reduceat(zs, starts); zmax = np.maximum.reduceat(zs, starts)
+        xmin = np.minimum.reduceat(xs, starts); xmax = np.maximum.reduceat(xs, starts)
+        ymin = np.minimum.reduceat(ys, starts); ymax = np.maximum.reduceat(ys, starts)
+        xsum = np.add.reduceat(xs, starts); ysum = np.add.reduceat(ys, starts)
+        ssum = np.add.reduceat(score_s, starts)
+        wood = np.add.reduceat((sem_s == WOOD).astype(np.int64), starts)
+        leaf = np.add.reduceat((sem_s == LEAF).astype(np.int64), starts)
+
+        for i in range(len(uniq)):
+            n = int(counts[i])
+            if n < 10:
+                continue
+            z_base, z_top = float(zmin[i]), float(zmax[i])
+            height = z_top - z_base
+            crown_width = float(max(xmax[i] - xmin[i], ymax[i] - ymin[i]))
+            wood_n, leaf_n = int(wood[i]), int(leaf[i])
+            trees.append({
+                'id': int(uniq[i]),
+                'n_points': n,
+                'height_m': round(z_top - ground_z, 2),   # height above ground
+                'trunk_height_m': round(height, 2),         # extent of the instance
+                'crown_width_m': round(crown_width, 2),
+                'crown_ratio': round(crown_width / height, 2) if height > 0.1 else None,
+                'wood_points': wood_n,
+                'leaf_points': leaf_n,
+                'leaf_wood_ratio': round(leaf_n / wood_n, 2) if wood_n > 0 else None,
+                'mean_score': round(float(ssum[i] / n), 3),
+                'center_x': round(float(xsum[i] / n), 2),
+                'center_y': round(float(ysum[i] / n), 2),
+                'base_z': round(z_base, 2),
+            })
 
     # Sort tallest first
     trees.sort(key=lambda t: t['height_m'], reverse=True)
