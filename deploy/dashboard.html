@@ -775,9 +775,9 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
       <div class="lc-head">
         <h3>Stand-level Assessment</h3>
         <span class="badge-ai">AI</span>
-        <button class="btn-sm" id="sceneBtn" onclick="analyzeScene()" style="margin-left:auto">Generate</button>
+        <button class="btn-sm" id="sceneBtn" onclick="analyzeScene()" style="margin-left:auto">Regenerate</button>
       </div>
-      <div class="lc-body muted" id="sceneBody">Click "Generate" to run an LLM structural and health assessment of the whole plot.</div>
+      <div class="lc-body muted" id="sceneBody">Loading the stand-level assessment…</div>
     </div>
     <div class="llm-card tree-card" id="treeCard" style="display:none">
       <div class="lc-head">
@@ -834,6 +834,7 @@ const UNASSIGNED = [80,80,80];
 // ==================== STATE ====================
 let selectedFile = null;
 let activeTaskId = null;
+let _sceneShownTask = null;   // task whose scene assessment is currently shown
 let currentPage = 'import';
 let treeMetrics = null;       // cached /result/{id}/trees for activeTaskId
 let treeMetricsTask = null;   // which task treeMetrics belongs to
@@ -1561,7 +1562,7 @@ const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
 const STREAM_MAX_CONCURRENT = 8;
 const STREAM_SCREEN_THRESHOLD = 60;  // lower = finer tiles; kept conservative to bound GPU load
 const STREAM_MAX_RENDER_PTS = 10_000_000;  // hard cap on rendered points — safety for weak GPUs
-const FFVIEWER_BUILD = '2026-07-29f';
+const FFVIEWER_BUILD = '2026-07-30a';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
@@ -2304,6 +2305,9 @@ async function refreshAnalysisPage() {
   empty.style.display = 'none';
   sceneCard.style.display = ''; treeCard.style.display = '';
   await loadTreeTable(activeTaskId);
+  // Scene assessment is precomputed at segmentation time — auto-load it (cache hit
+  // is instant; only an un-precomputed old result runs on demand).
+  if (_sceneShownTask !== activeTaskId) analyzeScene();
 }
 
 async function loadTreeTable(tid) {
@@ -2313,7 +2317,7 @@ async function loadTreeTable(tid) {
     wrap.innerHTML = '<div style="padding:20px;color:#8b949e;font-size:12px"><span class="spin"></span> Computing per-tree metrics…</div>';
     // Reset LLM cards for the new task
     document.getElementById('sceneBody').className = 'lc-body muted';
-    document.getElementById('sceneBody').textContent = 'Click "Generate" to run an LLM structural and health assessment of the whole plot.';
+    document.getElementById('sceneBody').textContent = 'Loading the stand-level assessment…';
     document.getElementById('treeBody').className = 'lc-body muted';
     document.getElementById('treeBody').textContent = 'Pick a tree in the table on the left for an AI structural and health assessment.';
     document.getElementById('treeCardTitle').textContent = 'Tree Health Analysis';
@@ -2455,18 +2459,22 @@ function renderTreeTable() {
 
 async function analyzeScene() {
   if (!activeTaskId) return;
+  const tid = activeTaskId;
+  _sceneShownTask = tid;   // claim now so auto-load doesn't double-fire
   const btn = document.getElementById('sceneBtn');
   const body = document.getElementById('sceneBody');
   btn.disabled = true;
   body.className = 'lc-body muted';
-  body.innerHTML = '<span class="spin"></span> LLM Analyzing (CPU inference, ~1–3 min)…';
+  body.innerHTML = '<span class="spin"></span> Analyzing on HPC GPU · usually instant (precomputed), up to ~1 min for older results…';
   try {
-    const resp = await fetch(`${API}/analyze/${activeTaskId}?lang=en`, {method: 'POST'});
+    const resp = await fetch(`${API}/analyze/${tid}?lang=en`, {method: 'POST'});
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+    if (activeTaskId !== tid) return;   // user switched away
     body.className = 'lc-body';
     body.textContent = data.analysis;
   } catch (e) {
+    if (_sceneShownTask === tid) _sceneShownTask = null;   // allow retry
     body.className = 'lc-body';
     body.innerHTML = `<span style="color:#f85149">Analysis failed: ${e.message}</span>`;
   } finally {
@@ -2481,7 +2489,7 @@ async function analyzeTree(treeId) {
   const body = document.getElementById('treeBody');
   document.getElementById('treeCardTitle').textContent = `Tree Health Analysis · #${treeId}`;
   body.className = 'lc-body muted';
-  body.innerHTML = '<span class="spin"></span> LLM Analyzing (CPU inference, ~1–3 min)…';
+  body.innerHTML = '<span class="spin"></span> Analyzing on HPC GPU · ~30–60s (cached after first run)…';
   try {
     const resp = await fetch(`${API}/analyze/${activeTaskId}/tree/${treeId}?lang=en`, {method: 'POST'});
     const data = await resp.json();
@@ -2675,7 +2683,8 @@ function renderMediaInspector() {
 
   let action;
   if (m.source === 'task') {
-    action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">View Result &amp; Analysis</button>`;
+    action = `<button class="btn btn-primary" onclick="viewTaskResult('${m.taskId}')">&#x1F5FA; View 3D Result</button>`;
+    action += `<button class="btn btn-primary" style="margin-top:8px" onclick="sendToAnalysis('${m.taskId}')">&#x1F916; Send to Analysis</button>`;
     // Merged card: this processed job still has its source dataset on the HPC, so
     // offer re-segmentation (e.g. with another model) without a re-upload.
     if (m.dataset_id) {
@@ -2845,6 +2854,13 @@ async function startSegmentation() {
 function viewTaskResult(tid) {
   switchPage('segment');
   selectTask(tid);
+}
+
+// Jump a completed result straight into the Analysis page (per-tree metrics + LLM),
+// no need to first select it on the Segment page.
+function sendToAnalysis(tid) {
+  activeTaskId = tid;
+  switchPage('analyze');   // refreshAnalysisPage() picks up activeTaskId
 }
 
 // Media page drop zone
