@@ -67,7 +67,9 @@ SING=$(command -v singularity || command -v apptainer)
 export CUDA_VISIBLE_DEVICES=0
 
 cd {workdir}
-"$SING" exec --nv --bind {workdir}:/workspace --pwd /workspace {sif} \\
+"$SING" exec --nv --bind {workdir}:/workspace --bind /lustre1/work/c30636:/lustre1/work/c30636 \\
+    --pwd /workspace \\
+    --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 {sif} \\
     python deploy/hpc_run_task.py \\
         --input /workspace/deploy_jobs/{jobdir}/input{suffix} \\
         --task-dir /workspace/deploy_jobs/{jobdir} \\
@@ -173,6 +175,86 @@ def _job_state(client, job_id):
     if rc == 0 and '=' in out:
         return out.split('=')[1].strip()[:1]
     return '?'
+
+
+# --- On-demand / cached LLM analysis on an HPC GPU (queue c30636g) ---
+
+LLM_PBS = """#!/bin/bash
+#PBS -q {queue}
+#PBS -N ff_{tag}
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=00:30:00
+#PBS -W group_list={group}
+#PBS -j oe
+#PBS -o {rdir}/{tag}.log
+
+module load singularity 2>/dev/null || true
+SING=$(command -v singularity || command -v apptainer)
+export CUDA_VISIBLE_DEVICES=0
+cd {workdir}
+"$SING" exec --nv --bind /lustre1/work/c30636:/lustre1/work/c30636 --pwd {workdir} \\
+    --env PYTHONPATH=/lustre1/work/c30636/models/pylibs:{workdir} \\
+    --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 {sif} \\
+    python deploy/hpc_llm.py --task-dir {rdir} --mode {mode} {tree_arg} --lang {lang} --out {out}
+exit $?
+"""
+
+
+def run_llm_analysis(task_id, mode, tree_id=None, lang='en', timeout=300):
+    """Return the LLM analysis (scene, or one tree) for a task, computing it on an
+    HPC GPU (queue c30636g) if not already cached. Cache hits (scene precomputed at
+    segmentation time, or a prior tree click) return instantly. Blocks until ready
+    or `timeout`s. Raises on missing result / qsub failure / timeout."""
+    if not task_id or '/' in task_id or '..' in task_id:
+        raise ValueError('bad task id')
+    if mode not in ('scene', 'tree'):
+        raise ValueError('bad mode')
+    if lang not in ('en', 'zh'):
+        lang = 'en'
+    rdir = posixpath.join(HPC_WORKDIR, 'deploy_jobs', task_id)
+    if mode == 'tree':
+        if tree_id is None:
+            raise ValueError('tree_id required')
+        tree_id = int(tree_id)
+        out_name, tag, tree_arg = (f'tree_{tree_id}_{lang}.json',
+                                   f'llm_{task_id}_t{tree_id}_{lang}',
+                                   f'--tree-id {tree_id}')
+    else:
+        out_name, tag, tree_arg = (f'scene_analysis_{lang}.json',
+                                   f'llm_{task_id}_scene_{lang}', '')
+    out_path = posixpath.join(rdir, out_name)
+
+    client = _connect()
+    try:
+        # 1) already cached?
+        _, out, _ = _exec(client, f"cat {out_path} 2>/dev/null")
+        if out.strip():
+            return json.loads(out)
+        # 2) need a result to analyze
+        _, out, _ = _exec(client, f"test -f {rdir}/result.ply && echo y || echo n")
+        if not out.strip().endswith('y'):
+            raise FileNotFoundError('no result for this task on HPC')
+        # 3) submit a GPU job on c30636g
+        script = LLM_PBS.format(queue=HPC_QUEUE, group=HPC_GROUP, tag=tag, rdir=rdir,
+                                workdir=HPC_WORKDIR, sif=HPC_SIF, mode=mode,
+                                tree_arg=tree_arg, lang=lang, out=out_path)
+        sftp = client.open_sftp()
+        pbs_path = posixpath.join(rdir, f'{tag}.pbs')
+        with sftp.open(pbs_path, 'w') as f:
+            f.write(script)
+        rc, out, err = _exec(client, f"cd {HPC_WORKDIR} && {QSUB} {pbs_path}")
+        if rc != 0:
+            raise RuntimeError(f'qsub failed: {(err or out).strip()}')
+        # 4) poll for the output json
+        end = time.time() + timeout
+        while time.time() < end:
+            time.sleep(HPC_POLL_INTERVAL)
+            _, out, _ = _exec(client, f"cat {out_path} 2>/dev/null")
+            if out.strip():
+                return json.loads(out)
+        raise TimeoutError('LLM analysis timed out on the HPC')
+    finally:
+        client.close()
 
 
 # --- Main entry (multiprocessing.Process target) ---

@@ -379,6 +379,30 @@ def run(input_path, task_dir, tile_size, overlap, config_path, checkpoint_path,
             stats['has_viewer'] = False
             rep.log(f"Tile generation failed (non-fatal): {tile_err}")
 
+        # ── Step 7: LLM scene analysis (precompute + cache on this GPU) ──
+        # Reuses the already-allocated GPU so the dashboard's scene analysis is
+        # instant (reads the cache) instead of running a slow CPU LLM on request.
+        try:
+            rep.update('analyzing', 96, stats=stats)
+            rep.log("Generating LLM scene analysis...")
+            sys.path.insert(0, '/lustre1/work/c30636/models/pylibs')
+            os.environ.setdefault('HF_HUB_OFFLINE', '1')
+            os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
+            from deploy import hpc_llm
+            from deploy.tree_analysis import compute_tree_metrics, build_scene_prompt
+            _metrics = compute_tree_metrics(output_ply,
+                                            cache_path=os.path.join(task_dir, 'trees.json'))
+            for _lang in ('en', 'zh'):
+                _sys_p, _usr_p = build_scene_prompt(_metrics, lang=_lang)
+                _text = _usr_p if _sys_p is None else hpc_llm._generate(_sys_p, _usr_p, max_new_tokens=500)
+                with open(os.path.join(task_dir, f'scene_analysis_{_lang}.json'), 'w') as f:
+                    json.dump({'task_id': os.path.basename(task_dir.rstrip('/')),
+                               'analysis': _text, 'n_trees': _metrics['n_trees'],
+                               'lang': _lang}, f)
+            rep.log("LLM scene analysis cached (en, zh)")
+        except Exception as llm_err:
+            rep.log(f"LLM scene analysis failed (non-fatal): {llm_err}")
+
         with open(os.path.join(task_dir, 'stats.json'), 'w') as f:
             json.dump(stats, f, indent=2)
 

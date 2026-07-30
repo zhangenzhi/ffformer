@@ -171,8 +171,9 @@ def _ollama_chat(system, user, temperature=0.3, timeout=300):
     return data['message']['content']
 
 
-def analyze_tree(metrics, tree_id, lang='en'):
-    """LLM health assessment for one tree."""
+def build_tree_prompt(metrics, tree_id, lang='en'):
+    """Return (system, user) for a single-tree assessment. Shared by the Ollama
+    path (server) and the HPC-GPU path (hpc_llm.py) so both produce the same text."""
     tree = next((t for t in metrics['trees'] if t['id'] == tree_id), None)
     if tree is None:
         raise ValueError(f'tree {tree_id} not found')
@@ -198,14 +199,21 @@ def analyze_tree(metrics, tree_id, lang='en'):
         "confidence); 3) points that warrant field verification. "
         "Keep it under 120 words."
     )
+    return system, user
+
+
+def analyze_tree(metrics, tree_id, lang='en'):
+    """LLM health assessment for one tree (via Ollama)."""
+    system, user = build_tree_prompt(metrics, tree_id, lang)
     return _ollama_chat(system, user)
 
 
-def analyze_scene(metrics, stats=None, lang='en'):
-    """LLM summary for the whole scene."""
+def build_scene_prompt(metrics, stats=None, lang='en'):
+    """Return (system, user) for a stand-level assessment, or (None, text) when
+    there are no trees. Shared by the Ollama and HPC-GPU paths."""
     trees = metrics['trees']
     if not trees:
-        return "No tree instances detected; nothing to analyze."
+        return None, "No tree instances detected; nothing to analyze."
     heights = [t['height_m'] for t in trees]
     lw = [t['leaf_wood_ratio'] for t in trees if t['leaf_wood_ratio'] is not None]
     summary = {
@@ -234,6 +242,14 @@ def analyze_scene(metrics, stats=None, lang='en'):
         "ratio); 3) individual trees to prioritise for field verification "
         "(by structural anomaly). Keep it under 160 words."
     )
+    return system, user
+
+
+def analyze_scene(metrics, stats=None, lang='en'):
+    """LLM summary for the whole scene (via Ollama)."""
+    system, user = build_scene_prompt(metrics, stats, lang)
+    if system is None:
+        return user   # no-trees message
     return _ollama_chat(system, user)
 
 

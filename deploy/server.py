@@ -1348,9 +1348,29 @@ def result_trees(task_id: str):
         raise HTTPException(500, f"Tree metric computation failed: {e}")
 
 
+def _hpc_llm(task_id, mode, tree_id=None, lang='zh'):
+    """Run LLM analysis on an HPC GPU (scene cached at seg time / tree on-demand)."""
+    _ensure_paramiko()
+    from deploy.hpc_backend import run_llm_analysis
+    return run_llm_analysis(task_id, mode, tree_id=tree_id, lang=lang)
+
+
 @app.post("/analyze/{task_id}")
 def analyze_scene_endpoint(task_id: str, lang: str = 'zh'):
-    """LLM stand-level analysis of the whole scene via in-cluster Ollama."""
+    """Stand-level LLM analysis. On the HPC backend this is precomputed at
+    segmentation time and served from cache (instant); otherwise on-demand."""
+    if '/' in task_id or '..' in task_id:
+        raise HTTPException(400, "Invalid task id")
+    if INFERENCE_BACKEND == 'hpc':
+        try:
+            data = _hpc_llm(task_id, 'scene', lang=lang)
+            return JSONResponse({'task_id': task_id, 'analysis': data.get('analysis', ''),
+                                 'n_trees': data.get('n_trees')})
+        except FileNotFoundError:
+            raise HTTPException(404, "No result for this task")
+        except Exception as e:
+            raise HTTPException(500, f"Analysis failed: {e}")
+    # Local / in-cluster Ollama fallback.
     task_dir = os.path.join(RESULTS_DIR, task_id)
     ply_path = os.path.join(task_dir, 'result.ply')
     if not os.path.isfile(ply_path):
@@ -1361,8 +1381,8 @@ def analyze_scene_endpoint(task_id: str, lang: str = 'zh'):
     try:
         metrics = tree_analysis.compute_tree_metrics(
             ply_path, cache_path=os.path.join(task_dir, 'trees.json'))
-        stats = tasks.get(task_id, {}).get('stats', {})
-        text = tree_analysis.analyze_scene(metrics, stats=stats, lang=lang)
+        text = tree_analysis.analyze_scene(
+            metrics, stats=tasks.get(task_id, {}).get('stats', {}), lang=lang)
         return JSONResponse({'task_id': task_id, 'analysis': text,
                              'n_trees': metrics['n_trees']})
     except Exception as e:
@@ -1371,7 +1391,21 @@ def analyze_scene_endpoint(task_id: str, lang: str = 'zh'):
 
 @app.post("/analyze/{task_id}/tree/{tree_id}")
 def analyze_tree_endpoint(task_id: str, tree_id: int, lang: str = 'zh'):
-    """LLM health assessment for a single tree."""
+    """Per-tree LLM assessment — on the HPC backend an on-demand GPU job (c30636g),
+    cached per tree so a repeat click is instant."""
+    if '/' in task_id or '..' in task_id:
+        raise HTTPException(400, "Invalid task id")
+    if INFERENCE_BACKEND == 'hpc':
+        try:
+            data = _hpc_llm(task_id, 'tree', tree_id=tree_id, lang=lang)
+            return JSONResponse({'task_id': task_id, 'tree_id': tree_id,
+                                 'analysis': data.get('analysis', '')})
+        except FileNotFoundError:
+            raise HTTPException(404, "No result for this task")
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        except Exception as e:
+            raise HTTPException(500, f"Analysis failed: {e}")
     task_dir = os.path.join(RESULTS_DIR, task_id)
     ply_path = os.path.join(task_dir, 'result.ply')
     if not os.path.isfile(ply_path):
@@ -1383,8 +1417,7 @@ def analyze_tree_endpoint(task_id: str, tree_id: int, lang: str = 'zh'):
         metrics = tree_analysis.compute_tree_metrics(
             ply_path, cache_path=os.path.join(task_dir, 'trees.json'))
         text = tree_analysis.analyze_tree(metrics, tree_id, lang=lang)
-        return JSONResponse({'task_id': task_id, 'tree_id': tree_id,
-                             'analysis': text})
+        return JSONResponse({'task_id': task_id, 'tree_id': tree_id, 'analysis': text})
     except ValueError as e:
         raise HTTPException(404, str(e))
     except Exception as e:
