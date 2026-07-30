@@ -117,19 +117,28 @@ def compute_tree_metrics(ply_path, cache_path=None):
             if n < 10:
                 continue
             z_base, z_top = float(zmin[i]), float(zmax[i])
+            # Height = the tree's own vertical span. Using a single GLOBAL ground
+            # median gave negative / tiny heights on sloped terrain (373 m relief),
+            # so use each tree's base as its local ground reference.
             height = z_top - z_base
             crown_width = float(max(xmax[i] - xmin[i], ymax[i] - ymin[i]))
             wood_n, leaf_n = int(wood[i]), int(leaf[i])
+            # leaf/wood ratio blows up (hundreds–thousands) when the stem is barely
+            # segmented (few wood points) — require enough wood points and a plausible
+            # ratio, else report unknown rather than noise.
+            lw = None
+            if wood_n >= 20 and leaf_n > 0:
+                _r = leaf_n / wood_n
+                lw = round(_r, 2) if _r <= 300 else None
             trees.append({
                 'id': int(uniq[i]),
                 'n_points': n,
-                'height_m': round(z_top - ground_z, 2),   # height above ground
-                'trunk_height_m': round(height, 2),         # extent of the instance
+                'height_m': round(height, 2),               # vertical extent ≈ tree height
                 'crown_width_m': round(crown_width, 2),
                 'crown_ratio': round(crown_width / height, 2) if height > 0.1 else None,
                 'wood_points': wood_n,
                 'leaf_points': leaf_n,
-                'leaf_wood_ratio': round(leaf_n / wood_n, 2) if wood_n > 0 else None,
+                'leaf_wood_ratio': lw,
                 'mean_score': round(float(ssum[i] / n), 3),
                 'center_x': round(float(xsum[i] / n), 2),
                 'center_y': round(float(ysum[i] / n), 2),

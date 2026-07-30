@@ -784,8 +784,10 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
         <h3 id="treeCardTitle">Tree Health Analysis</h3>
         <span class="badge-ai">AI</span>
       </div>
-      <canvas id="treeViewer3d" style="width:100%;height:260px;display:none;background:#0d1117;border-radius:8px;margin-bottom:10px;cursor:grab"></canvas>
-      <div class="lc-body muted" id="treeBody">Pick a tree in the table on the left for its full-resolution 3D view and an AI structural &amp; health assessment.</div>
+      <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap">
+        <canvas id="treeViewer3d" style="flex:1 1 300px;min-width:260px;height:300px;background:#0d1117;border-radius:8px;cursor:grab"></canvas>
+        <div class="lc-body muted" id="treeBody" style="flex:1 1 300px;min-width:240px;margin:0;overflow-y:auto;max-height:300px">Pick a tree in the table on the left for its full-resolution 3D view and an AI structural &amp; health assessment.</div>
+      </div>
     </div>
   </div>
 </div>
@@ -1563,7 +1565,7 @@ const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
 const STREAM_MAX_CONCURRENT = 8;
 const STREAM_SCREEN_THRESHOLD = 60;  // lower = finer tiles; kept conservative to bound GPU load
 const STREAM_MAX_RENDER_PTS = 10_000_000;  // hard cap on rendered points — safety for weak GPUs
-const FFVIEWER_BUILD = '2026-07-30b';
+const FFVIEWER_BUILD = '2026-07-30c';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
@@ -2520,8 +2522,7 @@ function tvAnimate() {
 async function loadTreePoints(tid, treeId) {
   initTreeViewer();
   const canvas = document.getElementById('treeViewer3d');
-  canvas.style.display = 'block';
-  const w = canvas.clientWidth || 400, h = 260;
+  const w = canvas.clientWidth || 400, h = canvas.clientHeight || 300;
   tvRenderer.setSize(w, h, false); tvCamera.aspect = w / h; tvCamera.updateProjectionMatrix();
   try {
     const resp = await fetch(`${API}/result/${tid}/tree/${treeId}/points`);
@@ -2545,7 +2546,7 @@ async function loadTreePoints(tid, treeId) {
     tvScene.add(tvPoints);
     tvSph = {r: tvR * 2.5, theta: -Math.PI / 2, phi: Math.PI / 3}; tvCam();
     if (!tvReq) { tvReq = true; tvAnimate(); }
-  } catch (e) { canvas.style.display = 'none'; console.warn('tree points', e); }
+  } catch (e) { console.warn('tree points', e); }
 }
 
 async function analyzeTree(treeId) {
