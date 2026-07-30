@@ -1565,7 +1565,7 @@ const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
 const STREAM_MAX_CONCURRENT = 8;
 const STREAM_SCREEN_THRESHOLD = 60;  // lower = finer tiles; kept conservative to bound GPU load
 const STREAM_MAX_RENDER_PTS = 10_000_000;  // hard cap on rendered points — safety for weak GPUs
-const FFVIEWER_BUILD = '2026-07-30f';
+const FFVIEWER_BUILD = '2026-07-30g';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
@@ -2542,7 +2542,7 @@ async function loadTreePoints(tid, treeId) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(p.subarray(0, n*3), 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(c.subarray(0, n*3), 3));
-    tvPoints = new THREE.Points(geo, new THREE.PointsMaterial({size: tvR*0.015, vertexColors: true, sizeAttenuation: true}));
+    tvPoints = new THREE.Points(geo, new THREE.PointsMaterial({size: tvR*0.03, vertexColors: true, sizeAttenuation: true}));
     tvScene.add(tvPoints);
     tvSph = {r: tvR * 2.0, theta: -Math.PI / 2, phi: Math.PI / 3}; tvCam();
     if (!tvReq) { tvReq = true; tvAnimate(); }
