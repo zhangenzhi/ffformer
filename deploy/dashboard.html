@@ -784,7 +784,7 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
         <h3 id="treeCardTitle">Tree Health Analysis</h3>
         <span class="badge-ai">AI</span>
       </div>
-      <div style="display:flex;gap:14px;align-items:stretch;height:52vh;min-height:340px">
+      <div style="display:flex;gap:14px;align-items:stretch;height:calc(100vh - 180px);min-height:360px">
         <canvas id="treeViewer3d" style="flex:1 1 0;min-width:0;height:100%;background:#0d1117;border-radius:8px;cursor:grab"></canvas>
         <div class="lc-body muted" id="treeBody" style="flex:1 1 0;min-width:0;margin:0;overflow-y:auto;height:100%">Pick a tree in the table on the left for its full-resolution 3D view and an AI structural &amp; health assessment.</div>
       </div>
@@ -1565,7 +1565,7 @@ const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
 const STREAM_MAX_CONCURRENT = 8;
 const STREAM_SCREEN_THRESHOLD = 60;  // lower = finer tiles; kept conservative to bound GPU load
 const STREAM_MAX_RENDER_PTS = 10_000_000;  // hard cap on rendered points — safety for weak GPUs
-const FFVIEWER_BUILD = '2026-07-30e';
+const FFVIEWER_BUILD = '2026-07-30f';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
