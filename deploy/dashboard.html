@@ -784,7 +784,8 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
         <h3 id="treeCardTitle">Tree Health Analysis</h3>
         <span class="badge-ai">AI</span>
       </div>
-      <div class="lc-body muted" id="treeBody">Pick a tree in the table on the left for an AI structural and health assessment.</div>
+      <canvas id="treeViewer3d" style="width:100%;height:260px;display:none;background:#0d1117;border-radius:8px;margin-bottom:10px;cursor:grab"></canvas>
+      <div class="lc-body muted" id="treeBody">Pick a tree in the table on the left for its full-resolution 3D view and an AI structural &amp; health assessment.</div>
     </div>
   </div>
 </div>
@@ -1562,7 +1563,7 @@ const STREAM_POINT_SIZE = 16; // bytes per point in .bin tiles
 const STREAM_MAX_CONCURRENT = 8;
 const STREAM_SCREEN_THRESHOLD = 60;  // lower = finer tiles; kept conservative to bound GPU load
 const STREAM_MAX_RENDER_PTS = 10_000_000;  // hard cap on rendered points — safety for weak GPUs
-const FFVIEWER_BUILD = '2026-07-30a';
+const FFVIEWER_BUILD = '2026-07-30b';
 console.log('%cFFViewer build ' + FFVIEWER_BUILD + ' — main-thread fast parse, LOD threshold ' + STREAM_SCREEN_THRESHOLD,
             'color:#2ea043;font-weight:bold');
 
@@ -2482,10 +2483,76 @@ async function analyzeScene() {
   }
 }
 
+// ---- Per-tree mini 3D viewer: the selected tree's FULL points (one tree is
+// small, so full-res is safe), colored trunk (orange) vs foliage (green). ----
+let tvRenderer, tvScene, tvCamera, tvPoints, tvR = 1, tvReq = false;
+let tvSph = {r: 3, theta: -Math.PI / 2, phi: Math.PI / 3};
+let tvDrag = false, tvlx = 0, tvly = 0;
+function tvCam() {
+  const s = tvSph;
+  tvCamera.position.set(s.r * Math.sin(s.phi) * Math.cos(s.theta),
+                        s.r * Math.sin(s.phi) * Math.sin(s.theta),
+                        s.r * Math.cos(s.phi));
+  tvCamera.lookAt(0, 0, 0);
+}
+function initTreeViewer() {
+  if (tvRenderer) return;
+  const canvas = document.getElementById('treeViewer3d');
+  tvRenderer = new THREE.WebGLRenderer({canvas, antialias: true});
+  tvRenderer.setPixelRatio(window.devicePixelRatio);
+  tvScene = new THREE.Scene(); tvScene.background = new THREE.Color(0x0d1117);
+  tvCamera = new THREE.PerspectiveCamera(55, 1, 0.01, 10000); tvCamera.up.set(0, 0, 1);
+  canvas.addEventListener('mousedown', e => { tvDrag = true; tvlx = e.clientX; tvly = e.clientY; e.preventDefault(); });
+  window.addEventListener('mousemove', e => {
+    if (!tvDrag) return;
+    tvSph.theta -= (e.clientX - tvlx) * 0.01;
+    tvSph.phi = Math.max(0.05, Math.min(Math.PI - 0.05, tvSph.phi - (e.clientY - tvly) * 0.01));
+    tvlx = e.clientX; tvly = e.clientY; tvCam();
+  });
+  window.addEventListener('mouseup', () => tvDrag = false);
+  canvas.addEventListener('wheel', e => { tvSph.r *= (1 + e.deltaY * 0.001); tvCam(); e.preventDefault(); }, {passive: false});
+}
+function tvAnimate() {
+  if (currentPage !== 'analyze') { tvReq = false; return; }   // never render off-screen
+  requestAnimationFrame(tvAnimate);
+  if (tvRenderer && tvScene) tvRenderer.render(tvScene, tvCamera);
+}
+async function loadTreePoints(tid, treeId) {
+  initTreeViewer();
+  const canvas = document.getElementById('treeViewer3d');
+  canvas.style.display = 'block';
+  const w = canvas.clientWidth || 400, h = 260;
+  tvRenderer.setSize(w, h, false); tvCamera.aspect = w / h; tvCamera.updateProjectionMatrix();
+  try {
+    const resp = await fetch(`${API}/result/${tid}/tree/${treeId}/points`);
+    if (!resp.ok) throw new Error('points ' + resp.status);
+    const { p, c, n } = _parseTileFast(await resp.arrayBuffer());
+    if (activeTaskId !== tid || selectedTreeId !== treeId) return;  // switched away
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < n; i++) { cx += p[i*3]; cy += p[i*3+1]; cz += p[i*3+2]; }
+    cx /= n; cy /= n; cz /= n;
+    let R = 0;
+    for (let i = 0; i < n; i++) {
+      p[i*3] -= cx; p[i*3+1] -= cy; p[i*3+2] -= cz;
+      const d = Math.hypot(p[i*3], p[i*3+1], p[i*3+2]); if (d > R) R = d;
+    }
+    tvR = R || 1;
+    if (tvPoints) { tvScene.remove(tvPoints); tvPoints.geometry.dispose(); tvPoints.material.dispose(); }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(p.subarray(0, n*3), 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(c.subarray(0, n*3), 3));
+    tvPoints = new THREE.Points(geo, new THREE.PointsMaterial({size: tvR*0.015, vertexColors: true, sizeAttenuation: true}));
+    tvScene.add(tvPoints);
+    tvSph = {r: tvR * 2.5, theta: -Math.PI / 2, phi: Math.PI / 3}; tvCam();
+    if (!tvReq) { tvReq = true; tvAnimate(); }
+  } catch (e) { canvas.style.display = 'none'; console.warn('tree points', e); }
+}
+
 async function analyzeTree(treeId) {
   if (!activeTaskId) return;
   selectedTreeId = treeId;
   renderTreeTable();
+  loadTreePoints(activeTaskId, treeId);   // full-res 3D of this tree (parallel)
   const body = document.getElementById('treeBody');
   document.getElementById('treeCardTitle').textContent = `Tree Health Analysis · #${treeId}`;
   body.className = 'lc-body muted';

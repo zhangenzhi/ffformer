@@ -150,6 +150,40 @@ def compute_tree_metrics(ply_path, cache_path=None):
     return result
 
 
+# Semantic point colors (match the 3D viewer): ground / wood / leaf.
+_SEM_RGB = np.array([[139, 119, 101], [210, 150, 60], [34, 180, 34]], dtype=np.uint8)
+
+
+def build_tree_point_store(ply_path, bin_path, index_path):
+    """Write every instance-assigned point, grouped by tree, as a 16 B/point blob
+    (xyz float32 + rgb uint8 + 1 pad — same layout the viewer's tile parser reads)
+    plus an index {tree_id: [byte_offset, n_points]}. One-time build per result;
+    afterwards a single tree's FULL points are served by byte-range. Returns index."""
+    if os.path.isfile(bin_path) and os.path.isfile(index_path):
+        with open(index_path) as f:
+            return json.load(f)
+    xyz, sem, inst, _score = _read_result_ply(ply_path)
+    valid = inst >= 0
+    inst_v = inst[valid]
+    xyz_v = np.ascontiguousarray(xyz[valid], dtype=np.float32)
+    sem_v = np.clip(sem[valid], 0, 2)
+    order = np.argsort(inst_v, kind='stable')
+    inst_s = inst_v[order]
+    xyz_s = np.ascontiguousarray(xyz_v[order])
+    rgb_s = _SEM_RGB[sem_v[order]]
+    n = len(inst_s)
+    rec = np.zeros((n, 16), dtype=np.uint8)
+    rec[:, 0:12] = xyz_s.view(np.uint8).reshape(n, 12)
+    rec[:, 12:15] = rgb_s
+    rec.tofile(bin_path)
+    uniq, starts, counts = np.unique(inst_s, return_index=True, return_counts=True)
+    index = {str(int(uniq[i])): [int(starts[i]) * 16, int(counts[i])]
+             for i in range(len(uniq))}
+    with open(index_path, 'w') as f:
+        json.dump(index, f)
+    return index
+
+
 def _ollama_chat(system, user, temperature=0.3, timeout=300):
     """Call the in-cluster Ollama chat API; return the assistant text."""
     payload = {

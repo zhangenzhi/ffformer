@@ -40,7 +40,8 @@ import mmcv_compat  # noqa: E402, F401
 
 from fastapi import (FastAPI, UploadFile, File, HTTPException, BackgroundTasks,
                      Request, Response, Cookie, Depends)
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import (FileResponse, JSONResponse, HTMLResponse,
+                               PlainTextResponse, Response)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -1335,7 +1336,9 @@ def download_json(task_id: str):
 @app.get("/result/{task_id}/trees")
 def result_trees(task_id: str):
     """Per-tree metrics computed from the result PLY (cached as trees.json)."""
-    _ensure_result_local(task_id)
+    if '/' in task_id or '..' in task_id:
+        raise HTTPException(400, "Invalid task id")
+    _ensure_result_local(task_id, want_ply=True)
     task_dir = os.path.join(RESULTS_DIR, task_id)
     ply_path = os.path.join(task_dir, 'result.ply')
     if not os.path.isfile(ply_path):
@@ -1346,6 +1349,35 @@ def result_trees(task_id: str):
         return JSONResponse(compute_tree_metrics(ply_path, cache_path=cache))
     except Exception as e:
         raise HTTPException(500, f"Tree metric computation failed: {e}")
+
+
+@app.get("/result/{task_id}/tree/{tree_id}/points")
+def result_tree_points(task_id: str, tree_id: int):
+    """Full-resolution points of ONE tree as a 16 B/point blob (xyz f32 + rgb + pad,
+    the viewer's tile layout), for the per-tree 3D view. A sorted point store is
+    built once per result, then each tree is served by byte-range."""
+    if '/' in task_id or '..' in task_id:
+        raise HTTPException(400, "Invalid task id")
+    _ensure_result_local(task_id, want_ply=True)
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    ply_path = os.path.join(task_dir, 'result.ply')
+    if not os.path.isfile(ply_path):
+        raise HTTPException(404, "No result for this task")
+    from deploy.tree_analysis import build_tree_point_store
+    bin_path = os.path.join(task_dir, 'trees_points.bin')
+    idx_path = os.path.join(task_dir, 'trees_points_index.json')
+    try:
+        index = build_tree_point_store(ply_path, bin_path, idx_path)
+    except Exception as e:
+        raise HTTPException(500, f"Point store build failed: {e}")
+    ent = index.get(str(tree_id))
+    if not ent:
+        raise HTTPException(404, "Tree not found")
+    offset, n = ent
+    with open(bin_path, 'rb') as f:
+        f.seek(offset)
+        data = f.read(n * 16)
+    return Response(content=data, media_type='application/octet-stream')
 
 
 def _hpc_llm(task_id, mode, tree_id=None, lang='zh'):
