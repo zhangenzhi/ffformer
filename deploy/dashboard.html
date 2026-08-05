@@ -1320,7 +1320,17 @@ async function selectTask(tid) {
   document.getElementById('infoPoints').textContent = `${(stats.n_processed||0).toLocaleString()} points`;
   document.getElementById('infoTime').textContent = `${stats.inference_time_s||'?'}s inference`;
 
-  // Load streaming viewer (octree tiles) or fallback to PLY
+  // Load streaming viewer (octree tiles) or fallback to PLY.
+  // First access after a pod restart pulls the octree from the HPC (up to ~30s
+  // for large scans); show a live spinner + timer so the panel isn't blank/frozen.
+  const _fetchStart = Date.now();
+  showViewerMessage('<span class="spin"></span>',
+    'Fetching point cloud from HPC&hellip; <b id="viewerFetchT">0s</b>'
+    + '<br><span style="opacity:.65;font-size:11px">first load after a restart can take ~30s</span>');
+  const _fetchTimer = setInterval(() => {
+    const el = document.getElementById('viewerFetchT');
+    if (el) el.textContent = Math.round((Date.now() - _fetchStart) / 1000) + 's';
+  }, 500);
   try {
     const metaResp = await fetch(`${API}/viewer/${tid}/metadata.json`);
     if (metaResp.ok) {
@@ -1347,6 +1357,8 @@ async function selectTask(tid) {
   } catch(e) {
     console.error('Failed to load viewer:', e);
     showViewerMessage('&#x26A0;&#xFE0F;', 'Failed to load this result for preview. Use Download PLY.');
+  } finally {
+    clearInterval(_fetchTimer);
   }
 }
 
