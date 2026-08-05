@@ -1198,7 +1198,7 @@ def task_status(task_id: str):
         result['download_url'] = f'/result/{task_id}/ply'
         result['json_url'] = f'/result/{task_id}/json'
 
-    if task['status'] == 'failed':
+    if task['status'] in ('failed', 'cancelled'):
         result['error'] = task.get('error', 'Unknown error')
 
     return JSONResponse(result)
@@ -1217,6 +1217,22 @@ def get_tile_preview(task_id: str, tile_idx: int):
                         headers={'Cache-Control': 'no-cache'})
 
 
+
+
+@app.post("/task/{task_id}/cancel")
+def cancel_task(task_id: str):
+    """Manually cancel a running/queued task. Sets a flag the inference process
+    polls; it then qdels the PBS job on the HPC and marks the task 'cancelled'.
+    Tasks no longer time out on their own — this is the only way to stop them."""
+    if task_id not in tasks:
+        raise HTTPException(404, "Task not found")
+    t = dict(tasks[task_id])
+    if t.get('status') in ('completed', 'failed', 'cancelled'):
+        return JSONResponse({'status': t.get('status'), 'task_id': task_id,
+                             'note': 'already finished'})
+    t['cancel_requested'] = True
+    tasks[task_id] = t
+    return JSONResponse({'status': 'cancelling', 'task_id': task_id})
 
 
 @app.delete("/task/{task_id}")
