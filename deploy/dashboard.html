@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ForestFormer3D Dashboard</title>
+<title>JPeaks-Forest Dashboard</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
 :root {
@@ -518,7 +518,7 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 <!-- ==================== LOGIN OVERLAY ==================== -->
 <div class="auth-overlay" id="authOverlay" style="display:none">
   <div class="auth-card">
-    <div class="logo">Forest<span>Former3D</span></div>
+    <div class="logo">JPeaks-<span>Forest</span></div>
     <div class="sub" id="authSub">Forest Point-Cloud Segmentation & Analysis</div>
     <div class="auth-tabs" id="authTabs">
       <button class="active" id="tabLogin" onclick="authTab('login')">Sign In</button>
@@ -573,7 +573,7 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
 </div>
 
 <header>
-  <div class="logo">Forest<span>Former3D</span></div>
+  <div class="logo">JPeaks-<span>Forest</span></div>
   <div class="status" id="serverStatus">
     <span class="dot off" id="statusDot"></span>
     <span id="statusText">Connecting...</span>
@@ -641,6 +641,7 @@ table.tree-table tbody tr.sel { background:rgba(88,166,255,0.12); }
         <div class="progress-header">
           <span id="progressLabel">Uploading...</span>
           <span class="elapsed" id="progressElapsed">0.0s</span>
+          <button class="btn-sm" id="cancelTaskBtn" onclick="cancelActiveTask()" style="margin-left:auto">Cancel</button>
         </div>
         <div class="progress-detail" id="progressDetail" style="font-size:10px;color:#8b949e;margin:0 0 6px;text-align:center;display:none"></div>
         <div class="progress-stages" id="progressStages"></div>
@@ -982,6 +983,22 @@ function updateProgressUI(data) {
   container.innerHTML = html;
 }
 
+async function cancelActiveTask() {
+  const taskId = progressContainer.dataset.taskId;
+  if (!taskId) return;
+  const btn = document.getElementById('cancelTaskBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
+  try {
+    const resp = await fetch(`${API}/task/${taskId}/cancel`, {method: 'POST'});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+    progressLabel.textContent = 'Cancelling on HPC…';
+  } catch (e) {
+    alert('Cancel failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Cancel'; }
+  }
+}
+
 function startPolling(taskId) {
   // Clear any existing polling for this task
   if (pollingTimers[taskId]) clearInterval(pollingTimers[taskId]);
@@ -1033,14 +1050,20 @@ function startPolling(taskId) {
         // Auto-select completed task
         selectTask(taskId);
         refreshFiles();
-      } else if (data.status === 'failed') {
+      } else if (data.status === 'failed' || data.status === 'cancelled') {
         clearInterval(pollingTimers[taskId]);
         delete pollingTimers[taskId];
         _hwSource = 'health';
 
         progressContainer.classList.remove('show');
         uploadBtn.disabled = false;
-        alert('Processing failed: ' + (data.error || 'Unknown error'));
+        const cbtn = document.getElementById('cancelTaskBtn');
+        if (cbtn) { cbtn.disabled = false; cbtn.textContent = 'Cancel'; }
+        if (data.status === 'cancelled') {
+          alert('Task cancelled.');
+        } else {
+          alert('Processing failed: ' + (data.error || 'Unknown error'));
+        }
       }
     } catch (e) {
       console.warn('Polling timeout (server busy), will retry...', e.message);
@@ -1057,6 +1080,7 @@ uploadBtn.addEventListener('click', async () => {
 
   // Show progress immediately
   progressContainer.classList.add('show');
+  { const cb = document.getElementById('cancelTaskBtn'); if (cb) { cb.disabled = false; cb.textContent = 'Cancel'; } }
   progressLabel.textContent = 'Uploading...';
   progressElapsed.textContent = '0.0s';
   document.getElementById('progressStages').innerHTML = '';

@@ -34,6 +34,7 @@ HPC_GROUP = os.environ.get('HPC_GROUP', 'c30636')
 HPC_POLL_INTERVAL = float(os.environ.get('HPC_POLL_INTERVAL', '10'))
 QSUB = os.environ.get('HPC_QSUB', '/opt/pbs/bin/qsub')
 QSTAT = os.environ.get('HPC_QSTAT', '/opt/pbs/bin/qstat')
+QDEL = os.environ.get('HPC_QDEL', '/opt/pbs/bin/qdel')
 
 STEP_LABELS = {
     'uploading': 'Uploading file',
@@ -123,7 +124,7 @@ def _update(task_id, step, progress=None, **extra):
     if progress is not None:
         t['progress'] = progress
     t['updated'] = now
-    t['status'] = step if step in ('completed', 'failed') else 'processing'
+    t['status'] = step if step in ('completed', 'failed', 'cancelled') else 'processing'
     t.update(extra)
     tasks[task_id] = t
 
@@ -354,13 +355,23 @@ def _submit_poll_download(client, sftp, task_id, jobdir, local_task_dir, t_start
         log_rpath = posixpath.join(rdir, 'inference.log')
         log_offset = 0
         fetched_previews = set()
-        deadline = time.time() + _walltime_seconds(HPC_WALLTIME) + 1800
         remote = {}
 
+        # No frontend timeout: the job may sit queued for a long time when the
+        # shared GPU queue is busy. We poll until it completes, fails, or the user
+        # cancels it manually (which qdels the PBS job and stops here).
         while True:
             time.sleep(HPC_POLL_INTERVAL)
-            if time.time() > deadline:
-                raise TimeoutError("HPC job exceeded walltime + grace period")
+
+            # Manual cancel: server sets tasks[task_id]['cancel_requested'].
+            if task_id in tasks and dict(tasks[task_id]).get('cancel_requested'):
+                try:
+                    _exec(client, f"{QDEL} {job_id}")
+                except Exception:
+                    pass
+                _log(task_id, t_start, f"Cancelled by user; qdel {job_id}")
+                _update(task_id, 'cancelled', progress=0, error='Cancelled by user')
+                return
 
             state = _job_state(client, job_id)
 
