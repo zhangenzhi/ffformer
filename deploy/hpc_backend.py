@@ -628,9 +628,12 @@ def fetch_result_bundle(task_id, local_dir, want_ply=True):
     try:
         import tarfile
         sftp = client.open_sftp()
-        # Prefer the prebuilt bundle (contains result.ply + stats + viewer).
+        # The prebuilt bundle contains result.ply + stats + viewer, so it is
+        # multi-GB. Only pull the whole thing when the PLY is actually needed (a
+        # download). Opening the streaming viewer must NOT block the request on a
+        # multi-GB transfer — it needs just the ~150MB octree fetched below.
         rc, out, _ = _exec(client, f"test -f {rdir}/result_bundle.tar.gz && echo y || echo n")
-        if out.strip().endswith('y'):
+        if want_ply and out.strip().endswith('y'):
             local_tar = os.path.join(local_dir, 'result_bundle.tar.gz')
             sftp.get(posixpath.join(rdir, 'result_bundle.tar.gz'), local_tar)
             with tarfile.open(local_tar) as tf:
