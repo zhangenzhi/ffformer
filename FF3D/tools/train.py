@@ -273,6 +273,10 @@ def main():
     parser.add_argument('--invariant-feat', action='store_true',
                         help='approach B: translation-invariant input (height above '
                              'ground), so the backbone is tile-size independent')
+    parser.add_argument('--grid-feat', type=float, default=0.0,
+                        help='grid-relative input (xy relative to a global fixed grid '
+                             'of this size in m + height): tile-independent like '
+                             'invariant but keeps local xy to recover instance recall')
     args = parser.parse_args()
     os.environ['FF_COARSE_SCALE'] = str(args.coarse_scale)
 
@@ -289,6 +293,7 @@ def main():
     ).to(device)
     model._coarse_attn = args.coarse_attn
     model._invariant_feat = args.invariant_feat
+    model._grid_feat = args.grid_feat
 
     # Fine-tuning init: load pretrained weights only (fresh optimizer/scheduler).
     # load_pretrained handles the spconv weight permutation + tolerates the new
@@ -358,19 +363,27 @@ def main():
         epoch_loss = {}
         t0 = time.time()
 
+        n_ok = 0
         for batch_idx, batch in enumerate(train_loader):
             if batch is None:
                 continue
 
-            loss_dict = compute_loss(model, batch, epoch, args.prepare_epoch, device)
+            try:
+                loss_dict = compute_loss(model, batch, epoch, args.prepare_epoch, device)
+                total_loss = sum(loss_dict.values())
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+                optimizer.step()
+                scheduler.step()
+            except torch.cuda.OutOfMemoryError:
+                # a rare heavy scene/batch overflows VRAM — skip it, don't kill the run
+                optimizer.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                print(f"  [oom] skipped batch {batch_idx} (epoch {epoch})", flush=True)
+                continue
 
-            total_loss = sum(loss_dict.values())
-            optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
-            optimizer.step()
-            scheduler.step()
-
+            n_ok += 1
             # Accumulate for logging
             for k, v in loss_dict.items():
                 val = v.item() if hasattr(v, 'item') else float(v)
@@ -378,13 +391,15 @@ def main():
 
         # Log
         dt = time.time() - t0
-        n_iters = len(train_loader)
+        n_iters = max(n_ok, 1)
         loss_str = '  '.join(f'{k}: {v/n_iters:.4f}' for k, v in epoch_loss.items())
         total = sum(epoch_loss.values()) / n_iters
-        print(f"[Epoch {epoch}/{args.epochs}] {dt:.1f}s  loss: {total:.4f}  {loss_str}")
+        skip = len(train_loader) - n_ok
+        print(f"[Epoch {epoch}/{args.epochs}] {dt:.1f}s  loss: {total:.4f}  {loss_str}"
+              + (f"  [skipped {skip}]" if skip else ""))
 
         # Save checkpoint
-        if epoch % 100 == 0 or epoch == args.epochs:
+        if epoch % 25 == 0 or epoch == args.epochs:
             ckpt_path = os.path.join(args.work_dir, f'epoch_{epoch}.pth')
             torch.save({
                 'epoch': epoch,
@@ -392,11 +407,7 @@ def main():
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
             }, ckpt_path)
-            # Keep only last 3 checkpoints
-            for old_epoch in range(1, epoch - 2):
-                old_path = os.path.join(args.work_dir, f'epoch_{old_epoch}.pth')
-                if os.path.exists(old_path):
-                    os.remove(old_path)
+            # (checkpoint pruning disabled — keep all saved epochs)
 
     print("Training complete!")
 
