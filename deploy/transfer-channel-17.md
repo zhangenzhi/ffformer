@@ -1,5 +1,18 @@
 # 高速転送チャネル「.17」— 現状アーカイブ & ffformer-PVC 着地計画
 
+> **✅ 2026-09-29 実施済み(§3 の推奨案を適用)。** HUCC+RC 再起動で extuser が過去の
+> アップロード/結果を見られなくなった障害の復旧として、`.17` を本番データ経路へ移行した:
+> 1. **pod は自分の PVC を索引**(`deploy/server.py` の `_scan_local_*`、SSH 廃止)→ 結果 10 件が復活。
+> 2. **ffformer-infer-base に rclone webdav サイドカー追加**(`ffformer-pvc` の `results` を
+>    subPath マウント、`:8081`、認証ユーザ `ffxfer`。パスワードは Deployment spec 内=live が正)。
+> 3. **`svc/bw17`(VIP `172.31.229.17`)を ffformer pod:8081 に向け替え** → `.17` は now ffformer PVC を指す。
+> 4. **grand1 から meta.json 16 件を `.17` 経由で PVC `_imports/` に backfill** → データセット 16 件が復活。
+>
+> 以降、grand1 は `http://133.50.39.17:443`(ユーザ `ffxfer`)へ push すると ffformer PVC の
+> `results/` に着地する。**残タスクは末尾「§5 残り」**(新規ジョブの結果回送の反転)。
+> 旧 bw17 Deployment(emptyDir + bwpass)は参照されなくなった(§0 の manifest はアーカイブ)。
+
+
 grand1(HPC)⇄ クラウド の高速データ経路。1GbE 管理網(172.31.20.1 eno1、上限
 119 MB/s)の代替として「サービス公開申請」で開通させた専用の公開IPペア。
 
@@ -103,12 +116,30 @@ rclone copy /dev/shm/big.bin :webdav: \
 - **bw17 に専用 RWX PVC を持たせ、pod 内で ffformer-pvc へ rsync**: ホップが増える。
 
 ### やること TODO
-- [ ] ffformer-infer-base に rclone サイドカー追加(ffformer-pvc 共有マウント)
-- [ ] `bw:bwpass` → Secret 化した強資格情報へ差し替え(bw17 も同様)
-- [ ] `svc/bw17`(=VIP .17)を ffformer pod へ向け替え
-- [ ] `hpc_backend` の結果回送を grand1-initiated rclone push に反転
-- [ ] grand1 にユーザ空間の新しい rclone を導入(上行の多スレッド化)
-- [ ] bw17 の initContainer(big.bin 生成)を本番構成では削除
+- [x] ffformer-infer-base に rclone サイドカー追加(ffformer-pvc の results を subPath マウント、:8081)
+- [x] `svc/bw17`(=VIP .17)を ffformer pod へ向け替え(targetPort 8081)
+- [x] pod 側の索引を PVC ローカル走査へ(server.py `_scan_local_*`)
+- [x] grand1 から meta.json を `.17` 経由で backfill(データセット復活)
+- [ ] **認証を Secret 化**(現在 `ffxfer:<pass>` を Deployment spec 内にインライン。
+  `Secret-Store Writes` ガードで自動作成不可 → 要ユーザの kubectl 権限。§4 参照)
+- [ ] `hpc_backend` の結果回送を grand1-initiated rclone push に反転(→ §5)
+- [ ] grand1 にユーザ空間の新しい rclone を導入(上行の多スレッド化。現状 v1.57)
+- [ ] 旧 bw17 Deployment を scale=0 or 削除(現在は参照されず遊休、big.bin 5GiB 保持)
+
+---
+
+## §5 残り — 新規ジョブの本番フロー反転(未実施)
+
+今回の障害復旧で「**索引=PVCローカル**」「**既存データの着地=.17 経由**」は移行済み。ただし
+**新規推論ジョブの往復はまだ旧経路(pod→HPC SSH, 1GbE)**のまま:
+
+- 現状: `/import` が pod→HPC へ SFTP アップロード → `hpc_backend` が pod から qsub →
+  完了後 pod が結果を SSH で pull(`fetch_result_bundle`)。管理網 SSH に依存。
+- あるべき姿: grand1(=HPC ログインノード)側が主導。ジョブ完了後、**PBS ジョブ末尾で
+  grand1 が結果一式を `.17`(ffxfer webdav)へ rclone push** → PVC `results/<id>/` に着地 →
+  pod は `_scan_local_results()` で拾う。入力アップロードも同様に grand1 主導へ寄せる。
+- これで法定停電で管理網が絞られても本番経路が生き残る。`hpc_backend.py` の
+  `_submit_poll_download` / `fetch_result_bundle` と PBS テンプレートの改修が必要。
 
 ---
 
