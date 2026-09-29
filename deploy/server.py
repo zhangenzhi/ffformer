@@ -1648,10 +1648,15 @@ def list_data():
     data_files = []
     seen = set()
     valid_ext = {'.las', '.laz', '.ply'}
+    # These hold pipeline OUTPUTS, not importable inputs — skip them, or the
+    # import picker fills up with every result.ply / tile_*_preview.ply.
+    skip_dirs = {os.path.realpath(RESULTS_DIR), os.path.realpath(IMPORT_DIR)}
     for scan_dir in scan_dirs:
         if not os.path.isdir(scan_dir):
             continue
         for root, dirs, files in os.walk(scan_dir):
+            dirs[:] = [d for d in dirs
+                       if os.path.realpath(os.path.join(root, d)) not in skip_dirs]
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in valid_ext:
