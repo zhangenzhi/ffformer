@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from .backbone import SpConvUNet
 from .decoder import QueryDecoder
-from ..utils.grid_utils import grid_sample, grid_subsample_queries
+from ..utils.grid_utils import grid_sample, grid_subsample_queries, select_queries
 from ..utils.nms import mask_matrix_nms
 from ..utils.ply_io import save_ply_predictions
 
@@ -56,6 +56,9 @@ class ForestFormer3D(nn.Module):
         self.query_point_num = query_point_num
         self.radius = radius
         self.score_th = score_th
+        _sth = os.environ.get('FF_SCORE_TH')
+        if _sth is not None:
+            self.score_th = float(_sth)
         self.chunk = chunk
         self.prepare_epoch = prepare_epoch
 
@@ -125,13 +128,23 @@ class ForestFormer3D(nn.Module):
         offsets = [0]      # cumulative point count per sample
 
         invariant = getattr(self, '_invariant_feat', False)
+        grid = float(getattr(self, '_grid_feat', 0.0))   # >0 → grid-relative feature
         for batch_idx, p in enumerate(points_list):
             # Normalize to voxel coordinates
             coords = torch.floor((p[:, :3] - p[:, :3].min(0)[0]) / self.voxel_size).int()
             # Add batch index as first column
             batch_col = torch.full((len(p), 1), batch_idx, dtype=torch.int32, device=p.device)
             all_coords.append(torch.cat([batch_col, coords], dim=1))
-            if invariant:
+            if grid > 0:
+                # Grid-relative feature: xy relative to a GLOBAL fixed grid cell
+                # (window/tile-independent, so backbone features are shareable like
+                # the invariant feature → overlap-dedup still works) but KEEPS local
+                # xy (unlike invariant which zeros it), to recover instance recall.
+                gx = torch.floor(p[:, 0] / grid) * grid + grid / 2
+                gy = torch.floor(p[:, 1] / grid) * grid + grid / 2
+                f = torch.stack([p[:, 0] - gx, p[:, 1] - gy, p[:, 2] - p[:, 2].min()], dim=1)
+                all_feats.append(f)
+            elif invariant:
                 # Translation-invariant feature (approach B): height above the
                 # crop's ground (z - z_min), xy zeroed. Makes backbone features
                 # independent of tile size/position → a voxel's features are the
@@ -327,7 +340,8 @@ class ForestFormer3D(nn.Module):
                 if tree_indices.numel() > 1:
                     # ⑧ Grid-based query selection
                     tree_xyz = pc3[tree_indices]
-                    selected_local = grid_subsample_queries(tree_xyz, self.query_point_num)
+                    selected_local = select_queries(tree_xyz, self.query_point_num,
+                                                    feat=embed_logits[tree_indices])
                     selected = tree_indices[selected_local]
                     queries = [x[0][selected]]
 
@@ -569,7 +583,12 @@ class ForestFormer3D(nn.Module):
                                                      p['pc3'].float()).argmin(1))
                         p['nn_idx_pc1'] = torch.cat(parts)
                     if tree_idx.numel() > 1:
-                        sel_local = grid_subsample_queries(p['pc3'][tree_idx], self.query_point_num)
+                        # embedding for FPS / embedding-adaptive (ISA-guided);
+                        # only computed when a query mode actually needs it
+                        efeat = self.Embed(xb)[tree_idx] \
+                            if os.environ.get('FF_QUERY_MODE', 'grid').lower() in ('fps', 'adaptive_emb') else None
+                        sel_local = select_queries(p['pc3'][tree_idx], self.query_point_num,
+                                                   feat=efeat)
                         p['selected'] = tree_idx[sel_local]
                         p['dec_j'] = len(x_for_dec)
                         x_for_dec.append(xb)

@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--query-num", type=int, default=300)
     parser.add_argument("--native-ckpt", action="store_true",
                         help="checkpoint is from our training ({'model':...}), not mm* format")
+    parser.add_argument("--invariant-feat", action="store_true",
+                        help="Translation-invariant input (height above ground, xy=0) — must match training (approach B)")
     parser.add_argument("--no-save", action="store_true",
                         help="skip PLY write — measure pure inference time")
     args = parser.parse_args()
@@ -75,6 +77,8 @@ def main():
         model.load_state_dict(ckpt['model'] if 'model' in ckpt else ckpt)
     else:
         load_pretrained(model, args.checkpoint)
+    if args.invariant_feat:
+        model._invariant_feat = True
     model = model.cuda().eval()
     print(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()):,d}")
 

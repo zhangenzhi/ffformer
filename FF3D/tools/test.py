@@ -34,6 +34,8 @@ def main():
     parser.add_argument('--data-root', required=True, help='ForAINetV2 data root')
     parser.add_argument('--split', default='test', choices=['test', 'val'])
     parser.add_argument('--output-dir', default=None, help='Save PLY results (optional)')
+    parser.add_argument('--grid-feat', type=float, default=0.0,
+                        help='grid-relative input feature (grid size m) — must match training')
     parser.add_argument('--invariant-feat', action='store_true',
                         help='Use translation-invariant input feature (height above ground, xy=0) — must match training')
     parser.add_argument('--native-ckpt', action='store_true',
@@ -57,6 +59,8 @@ def main():
 
     if args.invariant_feat:
         model._invariant_feat = True
+    if args.grid_feat:
+        model._grid_feat = args.grid_feat
 
     model = model.cuda().eval()
     print(f"Model loaded from {args.checkpoint}"
