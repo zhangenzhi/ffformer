@@ -1,0 +1,89 @@
+# bw17 — grand1→クラウド 高速転送チャネル「.17」の WebDAV エンドポイント
+# 現状スナップショット(kubectl から書き出し、2026-09-29 検証済み)。
+# namespace: c30636-default
+#
+# 役割: grand1(HPC)が client として能動的に接続する受け口。
+#   公開IP 133.50.39.17:443 → NAT → 中間VIP 172.31.229.17:443 → svc/bw17 → この pod:8080
+#   平文 HTTP の rclone WebDAV(TLS ではない)。資格情報は bw:bwpass(★テスト用、要差し替え)。
+#
+# ⚠️ 重要な制約と注意:
+#   - volume `data` は emptyDir(揮発)。ffformer-pvc とは別物。
+#     → grand1 からここへ送っても ffformer pod のストレージには入らない。
+#       転送を ffformer に着地させる計画は deploy/transfer-channel-17.md の「§3 計画」参照。
+#   - initContainer `gen` が起動毎に /data/big.bin(5GiB)を再生成(スループット測定用)。
+#     本番化する際は削除する。
+#   - image は rclone/rclone:latest(2026-09-29 時点で実体は v1.75.1)。
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bw17
+  namespace: c30636-default
+  labels:
+    app: bw17
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bw17
+  template:
+    metadata:
+      labels:
+        app: bw17
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # スループット測定用のダミー 5GiB。本番化時は削除。
+      - name: gen
+        image: busybox:1.36
+        command: ["sh", "-c", "dd if=/dev/zero of=/data/big.bin bs=1M count=5120 && ls -la /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      containers:
+      - name: rclone
+        image: rclone/rclone:latest
+        args: ["serve", "webdav", "/data", "--addr", ":8080", "--user", "bw", "--pass", "bwpass"]
+        env:
+        - name: HOME
+          value: /data
+        ports:
+        - containerPort: 8080
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}       # ← 本番では ffformer-pvc に置換したい(§3 参照、RWO 制約に注意)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bw17
+  namespace: c30636-default
+  # MetalLB が中間VIP 172.31.229.17 を割当(サービス公開申請の承認時に一括設定済み)
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 172.31.229.17
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 172.31.229.17
+  selector:
+    app: bw17
+  ports:
+  - port: 443           # 公開は 443(平文 HTTP がこの上を通る)
+    targetPort: 8080    # pod の rclone は 8080 待受
+    protocol: TCP

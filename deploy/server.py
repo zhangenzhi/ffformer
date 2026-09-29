@@ -976,6 +976,98 @@ def _sync_results_from_hpc():
     print(f'[sync] restored {n} results from HPC', flush=True)
 
 
+def _scan_local_datasets():
+    """Index uploaded datasets from the pod's OWN PVC (IMPORT_DIR/<id>/meta.json).
+    Primary index source in the grand1-push architecture: grand1 (the HPC login
+    node) pushes each dataset's small meta.json into the PVC over the .17 channel;
+    the multi-GB input.* stays on the HPC where inference runs. The pod indexes its
+    own disk — no SSH. Cheap to re-run: only adds ids not already known."""
+    try:
+        entries = os.listdir(IMPORT_DIR)
+    except OSError:
+        return
+    n = 0
+    for ds_id in entries:
+        d = os.path.join(IMPORT_DIR, ds_id)
+        if ds_id in datasets or not os.path.isdir(d):
+            continue
+        meta = {}
+        try:
+            with open(os.path.join(d, 'meta.json')) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            pass
+        local_inp = next((os.path.join(d, fn) for fn in os.listdir(d)
+                          if fn.startswith('input.')), None)
+        if not meta and not local_inp:
+            continue  # empty staging shell — nothing to show yet
+        fmt = (meta.get('format')
+               or (Path(local_inp).suffix.lstrip('.') if local_inp else 'laz'))
+        datasets[ds_id] = {
+            'dataset_id': ds_id, 'id': ds_id,
+            'filename': meta.get('filename', ds_id),
+            'size': meta.get('size',
+                             os.path.getsize(local_inp) if local_inp else 0),
+            'format': fmt, 'hpc_suffix': '.' + fmt,
+            'hpc_stage': 'ready', 'hpc_ready': True, 'hpc_progress': 100,
+            'created': meta.get('created', os.path.getmtime(d)),
+            'updated': time.time(), 'restored': True,
+        }
+        n += 1
+    if n:
+        print(f'[scan] indexed {n} local datasets from PVC', flush=True)
+
+
+def _scan_local_results():
+    """Index completed tasks from the pod's OWN PVC (RESULTS_DIR/<tid>/). Same
+    grand1-push model as _scan_local_datasets: results are pushed into the PVC and
+    the pod indexes its own disk. A dir counts as done if it has status/stats/PLY.
+    Never stomps a live (in-progress) task; only adds ids not already completed."""
+    try:
+        entries = os.listdir(RESULTS_DIR)
+    except OSError:
+        return
+    n = 0
+    for tid in entries:
+        d = os.path.join(RESULTS_DIR, tid)
+        if tid == os.path.basename(IMPORT_DIR) or not os.path.isdir(d):
+            continue
+        cur = tasks.get(tid)
+        if cur and cur.get('status') != 'completed':
+            continue  # a live task is authoritative — don't overwrite it
+        if cur and cur.get('status') == 'completed':
+            continue  # already indexed
+        stats, status = {}, {}
+        try:
+            with open(os.path.join(d, 'stats.json')) as f:
+                stats = json.load(f)
+        except (OSError, ValueError):
+            pass
+        try:
+            with open(os.path.join(d, 'status.json')) as f:
+                status = json.load(f)
+        except (OSError, ValueError):
+            pass
+        has_ply = os.path.isfile(os.path.join(d, 'result.ply'))
+        has_viewer = os.path.isfile(os.path.join(d, 'viewer', 'metadata.json'))
+        if not (stats or status or has_ply):
+            continue  # empty/partial dir
+        st = status.get('stats') or stats
+        updated = status.get('updated') or os.path.getmtime(d)
+        # id is shared with the dataset (deploy_jobs/<id>), so borrow its filename
+        fname = (datasets.get(tid) or {}).get('filename') or tid
+        tasks[tid] = {
+            'task_id': tid, 'status': 'completed', 'step': 'completed',
+            'step_label': 'Completed', 'progress': 100,
+            'filename': fname, 'stats': st,
+            'has_viewer': has_viewer, 'restored': False,
+            'created': updated, 'updated': updated,
+        }
+        n += 1
+    if n:
+        print(f'[scan] indexed {n} local results from PVC', flush=True)
+
+
 def _ensure_result_local(tid, want_ply=False):
     """A result restored from the HPC has no local files (pod /tmp was wiped). On
     first access, download+extract its bundle so the viewer/result endpoints work."""
@@ -1000,7 +1092,8 @@ def _ensure_result_local(tid, want_ply=False):
 
 @app.get("/datasets")
 def list_datasets():
-    _sync_datasets_from_hpc()
+    _scan_local_datasets()      # PVC-local index (grand1-push architecture)
+    _sync_datasets_from_hpc()   # legacy HPC-SSH fallback (no-op if unreachable)
     out = []
     for d in datasets.values():
         d = dict(d)
@@ -1012,6 +1105,7 @@ def list_datasets():
 
 @app.delete("/dataset/{ds_id}")
 def delete_dataset(ds_id: str):
+    _scan_local_datasets()      # so PVC-local datasets are known/deletable
     _sync_datasets_from_hpc()   # so HPC-only datasets are known/deletable
     shutil.rmtree(os.path.join(IMPORT_DIR, ds_id), ignore_errors=True)
     datasets.pop(ds_id, None)
@@ -1475,7 +1569,9 @@ def analyze_tree_endpoint(task_id: str, tree_id: int, lang: str = 'zh'):
 @app.get("/tasks")
 def list_tasks():
     """List all tasks with their current status and progress."""
-    _sync_results_from_hpc()
+    _scan_local_datasets()      # so restored results can borrow dataset filenames
+    _scan_local_results()       # PVC-local index (grand1-push architecture)
+    _sync_results_from_hpc()    # legacy HPC-SSH fallback (no-op if unreachable)
     result = {}
     for tid, t in tasks.items():
         result[tid] = {
