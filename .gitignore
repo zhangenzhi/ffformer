@@ -63,3 +63,7 @@ Thumbs.db
 deploy_jobs/
 examples/out/*
 !examples/out/.gitkeep
+
+# Scratch experiment scripts and their outputs (throwaway, not part of the repo)
+scratch_*
+*_out/
