@@ -918,7 +918,13 @@ def _sync_datasets_from_hpc():
     The uploaded data lives on the HPC (deploy_jobs/<id>/input.*); only the index
     was volatile, so a restart / redeploy lost visibility of prior uploads. Runs
     once, lazily, on the first dataset listing."""
-    if INFERENCE_BACKEND != 'hpc' or getattr(_sync_datasets_from_hpc, '_done', False):
+    # Retired path: the pod now indexes its own PVC (_scan_local_datasets). The
+    # management-network SSH is unreliable/being restricted, and a failed connect
+    # blocks the request for the full TCP timeout (~57s) on EVERY call, so this
+    # legacy HPC-SSH rebuild is off unless explicitly re-enabled.
+    if (INFERENCE_BACKEND != 'hpc'
+            or os.environ.get('HPC_SSH_INDEX') != '1'
+            or getattr(_sync_datasets_from_hpc, '_done', False)):
         return
     try:
         _ensure_paramiko()
@@ -950,7 +956,10 @@ def _sync_results_from_hpc():
     """Rebuild completed tasks from results persisted on the HPC. The pod's /tmp
     results are wiped on restart, but deploy_jobs/<id>/result.ply + stats + viewer
     survive. Runs once, lazily, on the first /tasks listing."""
-    if INFERENCE_BACKEND != 'hpc' or getattr(_sync_results_from_hpc, '_done', False):
+    # Retired path — see _sync_datasets_from_hpc. Off unless HPC_SSH_INDEX=1.
+    if (INFERENCE_BACKEND != 'hpc'
+            or os.environ.get('HPC_SSH_INDEX') != '1'
+            or getattr(_sync_results_from_hpc, '_done', False)):
         return
     try:
         _ensure_paramiko()
@@ -1625,7 +1634,10 @@ def list_data():
     """List available point-cloud files. With the HPC backend the data lives
     on the HPC (that's where inference runs), so scan there; otherwise scan
     the pod's own dirs."""
-    if INFERENCE_BACKEND == 'hpc':
+    # Only SSH-scan the HPC when explicitly enabled — the management-network SSH
+    # is retired and a failed connect would hang this endpoint for ~57s. Otherwise
+    # fall through to the fast local scan below.
+    if INFERENCE_BACKEND == 'hpc' and os.environ.get('HPC_SSH_INDEX') == '1':
         _ensure_paramiko()
         from deploy.hpc_backend import list_hpc_data
         try:
