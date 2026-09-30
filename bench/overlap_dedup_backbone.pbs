@@ -1,0 +1,20 @@
+#!/bin/bash
+#PBS -q sg
+#PBS -N ff_dedupbb
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=0:40:00
+#PBS -W group_list=c30746
+#PBS -j oe
+#PBS -o /lustre1/work/c30636/ffformer/work_dirs/overlap_dedup.log
+module load singularity 2>/dev/null || true
+SING=$(command -v singularity || command -v apptainer)
+export CUDA_VISIBLE_DEVICES=0
+cd /lustre1/work/c30636/ffformer
+nvidia-smi dmon -s pum -d 1 -o T > work_dirs/overlap_dedup_dmon.txt 2>/dev/null &
+DMON=$!
+"$SING" exec --nv --bind /lustre1/work/c30636:/lustre1/work/c30636 --pwd /lustre1/work/c30636/ffformer \
+    --env PYTHONPATH=/lustre1/work/c30636/ffformer/FF3D \
+    --env FF_COARSE_SCALE=2 \
+    ffformer.sif python bench/overlap_dedup_backbone.py 2>&1 | tail -8
+kill $DMON 2>/dev/null
+echo "EXIT_DONE"
