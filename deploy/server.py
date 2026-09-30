@@ -1050,6 +1050,11 @@ def _scan_local_results():
         has_viewer = os.path.isfile(os.path.join(d, 'viewer', 'metadata.json'))
         if not (stats or status or has_ply):
             continue  # empty/partial dir
+        # Only index finished runs. A dir with a request.json / status step other
+        # than 'completed' (and no result.ply yet) is a job in flight the grand1
+        # worker is still processing — leave it to the live watcher.
+        if status.get('step') not in ('completed', None) and not has_ply:
+            continue
         st = status.get('stats') or stats
         updated = status.get('updated') or os.path.getmtime(d)
         # id is shared with the dataset (deploy_jobs/<id>), so borrow its filename
@@ -1064,6 +1069,54 @@ def _scan_local_results():
         n += 1
     if n:
         print(f'[scan] indexed {n} local results from PVC', flush=True)
+
+
+_WATCH_LABELS = {
+    'queued': 'Queued on HPC', 'staging': 'Staging input to HPC',
+    'starting': 'Starting', 'reading': 'Reading point cloud',
+    'splitting': 'Tiling', 'tiling': 'Building viewer',
+    'inferring': 'Segmenting', 'merging': 'Merging tiles',
+    'saving': 'Saving results', 'analyzing': 'Analyzing trees',
+    'completed': 'Completed', 'failed': 'Failed',
+}
+
+
+def _watch_pvc_status(task_id, timeout=20 * 3600):
+    """Mirror a running job's status.json (written into RESULTS_DIR/<task_id>/ by
+    the grand1 worker over .17) into the in-memory task index so /task/<id>/status
+    shows live progress. Daemon thread; exits on finish/timeout. If the pod
+    restarts mid-run, _scan_local_results recovers the job once it completes."""
+    sp = os.path.join(RESULTS_DIR, task_id, 'status.json')
+    start = time.time()
+    while time.time() - start < timeout:
+        time.sleep(6)
+        if task_id not in tasks:
+            return
+        try:
+            with open(sp) as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            continue
+        step = st.get('step', 'processing')
+        t = dict(tasks[task_id])
+        t['step'] = step
+        t['step_label'] = _WATCH_LABELS.get(step, step)
+        t['progress'] = st.get('progress', t.get('progress', 0))
+        for k in ('stats', 'completed_tiles', 'error', 'hw'):
+            if st.get(k) is not None:
+                t[k] = st[k]
+        if step == 'completed':
+            t['status'] = 'completed'
+            t['progress'] = 100
+            t['has_viewer'] = bool((st.get('stats') or {}).get('has_viewer'))
+        elif step == 'failed':
+            t['status'] = 'failed'
+        else:
+            t['status'] = 'processing'
+        t['updated'] = time.time()
+        tasks[task_id] = t
+        if step in ('completed', 'failed'):
+            return
 
 
 def _ensure_result_local(tid, want_ply=False):
@@ -1154,27 +1207,41 @@ def segment_dataset(ds_id: str, req: _SegmentRequest):
             shutil.rmtree(task_dir, ignore_errors=True)
             raise HTTPException(409, f"Dataset still staging to HPC "
                                      f"({d.get('hpc_stage')})")
-        _ensure_paramiko()
-        from deploy.hpc_backend import run_hpc_inference_prestaged
-        proc = multiprocessing.Process(
-            target=run_hpc_inference_prestaged,
-            args=(tasks, task_id, ds_id, d.get('hpc_suffix', '.laz'),
-                  req.tile_size, req.overlap, model),
-            daemon=True)
-    else:
-        # Local backend: segment from the pod copy.
-        suffix = '.' + d.get('format', 'las')
-        input_link = os.path.join(task_dir, f'input{suffix}')
+        # Hand off to the grand1 worker through the PVC (no pod->HPC SSH): drop a
+        # request it polls; it pulls the input over .17, qsubs on the HPC, and
+        # pushes results + status back into this task dir. A local watcher mirrors
+        # that status.json into the task index so the UI shows live progress.
+        suffix = d.get('hpc_suffix') or ('.' + d.get('format', 'laz'))
+        request = {'task_id': task_id, 'dataset_id': ds_id, 'suffix': suffix,
+                   'tile_size': req.tile_size, 'overlap': req.overlap,
+                   'model': model, 'filename': d.get('filename', ds_id),
+                   'created': time.time()}
         try:
-            os.symlink(d['input_path'], input_link)
-        except (OSError, KeyError):
-            shutil.copy2(d['input_path'], input_link)
-        proc = multiprocessing.Process(
-            target=_run_inference_background,
-            args=(tasks, task_id, input_link, suffix, req.tile_size, req.overlap),
-            daemon=True)
-    proc.start()
+            with open(os.path.join(task_dir, 'request.json'), 'w') as f:
+                json.dump(request, f)
+            with open(os.path.join(task_dir, 'status.json'), 'w') as f:
+                json.dump({'step': 'queued', 'progress': 5, 'stats': {}}, f)
+        except OSError as ex:
+            del tasks[task_id]
+            raise HTTPException(500, f"Could not queue job: {ex}")
+        threading.Thread(target=_watch_pvc_status, args=(task_id,),
+                         daemon=True).start()
+        return JSONResponse({'task_id': task_id, 'dataset_id': ds_id,
+                             'status': 'processing',
+                             'status_url': f'/task/{task_id}/status'})
 
+    # Local backend: segment from the pod copy.
+    suffix = '.' + d.get('format', 'las')
+    input_link = os.path.join(task_dir, f'input{suffix}')
+    try:
+        os.symlink(d['input_path'], input_link)
+    except (OSError, KeyError):
+        shutil.copy2(d['input_path'], input_link)
+    proc = multiprocessing.Process(
+        target=_run_inference_background,
+        args=(tasks, task_id, input_link, suffix, req.tile_size, req.overlap),
+        daemon=True)
+    proc.start()
     return JSONResponse({'task_id': task_id, 'dataset_id': ds_id,
                          'status': 'processing', 'status_url': f'/task/{task_id}/status'})
 

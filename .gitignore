@@ -67,3 +67,8 @@ examples/out/*
 # Scratch experiment scripts and their outputs (throwaway, not part of the repo)
 scratch_*
 *_out/
+
+# grand1 worker: secrets + local state (never commit)
+deploy/.webdav-creds
+.worker_state/
+worker.log
