@@ -814,43 +814,32 @@ async def import_dataset(file: UploadFile = File(...)):
     await file.seek(0)
 
     if INFERENCE_BACKEND == 'hpc':
-        # Relay the stream to the HPC in a writer thread while we read the body.
-        import queue as _queue
-        _ensure_paramiko()
-        from deploy.hpc_backend import stream_import_to_hpc
-        cq = _queue.Queue(maxsize=8)   # ~32 MB in-flight buffer + backpressure
-        state = {}
-        writer = threading.Thread(target=stream_import_to_hpc,
-                                  args=(ds_id, suffix, cq, state), daemon=True)
-        writer.start()
-        total = 0
-        try:
+        # Migrated upload path (grand1-push architecture): land the file in the
+        # pod's OWN PVC — the pod->HPC management SSH is retired and would hang the
+        # request at 100% waiting on a dead connection. grand1 (the HPC login node)
+        # pulls the input from here over the .17 channel to run inference.
+        with open(input_path, 'wb') as f:
             while True:
-                chunk = await file.read(4 * 1024 * 1024)
+                chunk = await file.read(8 * 1024 * 1024)
                 if not chunk:
                     break
-                await asyncio.to_thread(cq.put, chunk)  # blocks if HPC lags
-                total += len(chunk)
-        finally:
-            await asyncio.to_thread(cq.put, None)       # sentinel: end stream
-            await asyncio.to_thread(writer.join)
+                f.write(chunk)
+        total = os.path.getsize(input_path)
         if total == 0:
-            _dset(hpc_stage='failed', error='empty upload')
+            shutil.rmtree(ds_dir, ignore_errors=True)
+            del datasets[ds_id]
             raise HTTPException(400, "Uploaded file is empty")
-        if state.get('error'):
-            _dset(hpc_stage='failed', error=state['error'])
-            raise HTTPException(502, f"HPC staging failed: {state['error']}")
-        _dset(size=total, hpc_stage='ready', hpc_ready=True, hpc_progress=100,
-              hpc_suffix=state.get('hpc_suffix', suffix))
-        # Persist metadata on the HPC so the dataset (name + format) is restorable
-        # after a server restart — the index is volatile, the HPC data is not.
+        # meta.json next to the input so the dataset survives a restart and grand1
+        # can read name/format when it pulls the input.
         try:
-            from deploy.hpc_backend import write_dataset_meta
-            write_dataset_meta(ds_id, {'filename': file.filename,
-                                       'format': suffix.lstrip('.'), 'size': total,
-                                       'created': datasets[ds_id]['created']})
-        except Exception as ex:
-            print(f'[import] meta write failed: {ex}', flush=True)
+            with open(os.path.join(ds_dir, 'meta.json'), 'w') as mf:
+                json.dump({'filename': file.filename, 'format': suffix.lstrip('.'),
+                           'size': total,
+                           'created': datasets[ds_id]['created']}, mf)
+        except OSError as ex:
+            print(f'[import] local meta write failed: {ex}', flush=True)
+        _dset(size=total, input_path=input_path, hpc_stage='ready',
+              hpc_ready=True, hpc_progress=100, hpc_suffix=suffix)
     else:
         with open(input_path, 'wb') as f:
             while True:
