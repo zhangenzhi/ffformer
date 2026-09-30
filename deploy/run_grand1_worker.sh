@@ -2,10 +2,13 @@
 # Launch the grand1 worker (see deploy/grand1_worker.py) as a detached daemon.
 # Run on grand1 (the HPC login node). Single-GPU 'sg' queue submissions.
 #
-#   deploy/run_grand1_worker.sh          # start (no-op if already running)
+#   deploy/run_grand1_worker.sh          # start detached (nohup)
+#   deploy/run_grand1_worker.sh tmux     # start inside a tmux session 'ffworker'
+#   deploy/run_grand1_worker.sh fg       # run in the foreground (used by tmux)
 #   deploy/run_grand1_worker.sh stop     # stop
-#   deploy/run_grand1_worker.sh restart  # restart
+#   deploy/run_grand1_worker.sh restart  # restart (detached)
 #   deploy/run_grand1_worker.sh status   # show pid + log tail
+# tmux:  attach with 'tmux attach -t ffworker'  (detach: Ctrl-b then d)
 set -u
 REPO="${FFFORMER_REPO:-/lustre1/work/c30636/ffformer}"
 cd "$REPO" || exit 1
@@ -21,21 +24,44 @@ PIDFILE="$REPO/.worker_state/worker.pid"
 
 _pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null; }
 
+TMUX_SESSION="${FFWORKER_TMUX:-ffworker}"
+
 case "${1:-start}" in
   stop|restart)
-    pkill -f 'deploy/grand1_worker.py' 2>/dev/null && echo "stopped"
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
+    pkill -f 'python3 deploy/grand1_worker.py' 2>/dev/null && echo "stopped"
     rm -f "$PIDFILE"
     [ "$1" = stop ] && exit 0
     ;;
+  fg)
+    # Run in the foreground (env already exported above) — used inside tmux.
+    # Tee so the tmux pane shows live logs and worker.log keeps a copy.
+    python3 deploy/grand1_worker.py 2>&1 | tee -a "$LOG"
+    ;;
+  tmux)
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      echo "tmux session '$TMUX_SESSION' already exists (attach: tmux attach -t $TMUX_SESSION)"
+      exit 0
+    fi
+    if pgrep -f 'python3 deploy/grand1_worker.py' >/dev/null 2>&1; then
+      echo "a worker is already running outside tmux; stop it first (run_grand1_worker.sh stop)"
+      exit 1
+    fi
+    # 'fg' re-runs this script from the top, which re-exports the sg defaults.
+    tmux new-session -d -s "$TMUX_SESSION" -c "$REPO" \
+      "bash '$REPO/deploy/run_grand1_worker.sh' fg"
+    echo "started in tmux '$TMUX_SESSION' (queue=$HPC_QUEUE group=$HPC_GROUP); attach: tmux attach -t $TMUX_SESSION"
+    exit 0
+    ;;
 esac
 
-if pgrep -f 'deploy/grand1_worker.py' >/dev/null 2>&1 && [ "${1:-start}" = start ]; then
-  echo "already running (pid $(pgrep -f 'deploy/grand1_worker.py' | head -1))"
+if pgrep -f 'python3 deploy/grand1_worker.py' >/dev/null 2>&1 && [ "${1:-start}" = start ]; then
+  echo "already running (pid $(pgrep -f 'python3 deploy/grand1_worker.py' | head -1))"
   exit 0
 fi
 
 if [ "${1:-start}" = status ]; then
-  echo "pid: $(pgrep -f 'deploy/grand1_worker.py' | head -1 || echo none)"
+  echo "pid: $(pgrep -f 'python3 deploy/grand1_worker.py' | head -1 || echo none)"
   tail -8 "$LOG" 2>/dev/null
   exit 0
 fi

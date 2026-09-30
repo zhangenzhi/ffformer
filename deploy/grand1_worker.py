@@ -73,29 +73,29 @@ def _rc(args, **kw):
     return subprocess.run(base + args, capture_output=True, text=True, **kw)
 
 
-def rc_lsf(remote):
-    r = _rc(['lsf', remote, '-R'])
-    return r.stdout.splitlines() if r.returncode == 0 else []
+def _R(path):
+    """Remote path on the .17 webdav (root = the PVC results dir)."""
+    return ':webdav:' + path.lstrip('/')
 
 
 def rc_cat(remote):
-    r = _rc(['cat', remote])
+    r = _rc(['cat', _R(remote)])
     return r.stdout if r.returncode == 0 else None
 
 
 def rc_pull(remote, localdir):
     os.makedirs(localdir, exist_ok=True)
-    return _rc(['copy', remote, localdir, '--transfers', '4',
+    return _rc(['copy', _R(remote), localdir, '--transfers', '4',
                 '--multi-thread-streams', '8']).returncode == 0
 
 
 def rc_push_file(localfile, remotedir):
-    return _rc(['copy', localfile, remotedir, '--transfers', '4',
+    return _rc(['copy', localfile, _R(remotedir), '--transfers', '4',
                 '--multi-thread-streams', '8']).returncode == 0
 
 
 def rc_push_dir(localdir, remotedir):
-    return _rc(['copy', localdir, remotedir, '--transfers', '4',
+    return _rc(['copy', localdir, _R(remotedir), '--transfers', '4',
                 '--multi-thread-streams', '8']).returncode == 0
 
 
@@ -199,6 +199,16 @@ def process(task_id):
         except ValueError:
             pass
 
+    # In-flight guard: if we already submitted a job for this task and it is
+    # still queued/running, don't resubmit (e.g. after a worker restart).
+    jobf = os.path.join(STATE_DIR, f'{task_id}.job')
+    if os.path.isfile(jobf):
+        jid = open(jobf).read().strip()
+        if jid and job_alive(jid):
+            log(f"  {task_id} already submitted ({jid}), still queued/running — skip")
+            return
+        os.remove(jobf)  # job gone and not completed → allow a retry
+
     push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
     rdir = os.path.join(DEPLOY_JOBS, task_id)
     os.makedirs(rdir, exist_ok=True)
@@ -215,6 +225,8 @@ def process(task_id):
 
     push_status(task_id, {'step': 'queued', 'progress': 10, 'stats': {}})
     jobid = qsub_job(task_id, ds_id, suffix, tile_size, overlap, model)
+    with open(jobf, 'w') as f:
+        f.write(jobid)
     log(f"  qsub {task_id} -> {jobid}")
 
     start = time.time()
@@ -254,9 +266,13 @@ def process(task_id):
 
 
 def find_pending():
-    """task_ids that have a request.json but no completed status yet."""
+    """task_ids that have a request.json but no completed status yet. Depth is
+    capped at 2 so we don't recurse the deep viewer/tiles trees under each result."""
     out = []
-    for line in rc_lsf(':webdav:'):
+    r = _rc(['lsf', ':webdav:', '-R', '--max-depth', '2'])
+    if r.returncode != 0:
+        return out
+    for line in r.stdout.splitlines():
         if line.endswith('/request.json'):
             tid = line.split('/', 1)[0]
             if not is_done_local(tid):
