@@ -22,7 +22,11 @@ export HPC_WALLTIME="${HPC_WALLTIME:-06:00:00}"
 LOG="$REPO/worker.log"
 PIDFILE="$REPO/.worker_state/worker.pid"
 
-_pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null; }
+# Liveness via the pidfile the worker maintains (grand1_worker.py _write_pid).
+# pgrep -f is unreliable here: it matches any shell whose command line mentions
+# the script name, including the one invoking this launcher.
+_pid() { cat "$PIDFILE" 2>/dev/null; }
+_running() { local p; p="$(_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 
 TMUX_SESSION="${FFWORKER_TMUX:-ffworker}"
 
@@ -43,8 +47,8 @@ case "${1:-start}" in
       echo "tmux session '$TMUX_SESSION' already exists (attach: tmux attach -t $TMUX_SESSION)"
       exit 0
     fi
-    if pgrep -f 'python3 deploy/grand1_worker.py' >/dev/null 2>&1; then
-      echo "a worker is already running outside tmux; stop it first (run_grand1_worker.sh stop)"
+    if _running; then
+      echo "a worker is already running (pid $(_pid)); stop it first (run_grand1_worker.sh stop)"
       exit 1
     fi
     # 'fg' re-runs this script from the top, which re-exports the sg defaults.
@@ -55,13 +59,13 @@ case "${1:-start}" in
     ;;
 esac
 
-if pgrep -f 'python3 deploy/grand1_worker.py' >/dev/null 2>&1 && [ "${1:-start}" = start ]; then
-  echo "already running (pid $(pgrep -f 'python3 deploy/grand1_worker.py' | head -1))"
+if _running && [ "${1:-start}" = start ]; then
+  echo "already running (pid $(_pid))"
   exit 0
 fi
 
 if [ "${1:-start}" = status ]; then
-  echo "pid: $(pgrep -f 'python3 deploy/grand1_worker.py' | head -1 || echo none)"
+  if _running; then echo "pid: $(_pid) (running)"; else echo "pid: none"; fi
   tail -8 "$LOG" 2>/dev/null
   exit 0
 fi
