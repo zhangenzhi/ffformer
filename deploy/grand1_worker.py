@@ -136,15 +136,21 @@ def qsub_job(task_id, ds_id, suffix, tile_size, overlap, model):
     return r.stdout.strip()
 
 
-def job_alive(jobid):
+def job_state(jobid):
+    """PBS state char: 'Q' queued, 'R' running, 'H' held, 'E'/'C'/'F' ending/done,
+    or None when PBS no longer knows the job (purged = finished)."""
     r = subprocess.run([QSTAT, jobid], capture_output=True, text=True)
     if r.returncode != 0:
-        return False  # unknown to PBS = finished/purged
+        return None
     for line in r.stdout.splitlines():
         parts = line.split()
         if parts and parts[0].split('.')[0] == jobid.split('.')[0]:
-            return parts[-2] not in ('C', 'F', 'E')  # completing/finished/exiting
-    return True
+            return parts[-2]
+    return None
+
+
+def job_alive(jobid):
+    return job_state(jobid) not in (None, 'C', 'F', 'E')
 
 
 def read_local_status(task_id):
@@ -199,52 +205,72 @@ def process(task_id):
         except ValueError:
             pass
 
-    # In-flight guard: if we already submitted a job for this task and it is
-    # still queued/running, don't resubmit (e.g. after a worker restart).
+    # In-flight guard: if we already submitted a job for this task that is still
+    # queued/running (e.g. after a worker restart), RESUME tracking it rather than
+    # resubmitting — so its result still gets pushed when it finishes.
     jobf = os.path.join(STATE_DIR, f'{task_id}.job')
+    jobid = None
     if os.path.isfile(jobf):
         jid = open(jobf).read().strip()
         if jid and job_alive(jid):
-            log(f"  {task_id} already submitted ({jid}), still queued/running — skip")
+            jobid = jid
+            log(f"  resume tracking {task_id} (job {jid} already queued/running)")
+        else:
+            os.remove(jobf)  # job gone and not completed → allow a retry
+
+    if jobid is None:
+        push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
+        rdir = os.path.join(DEPLOY_JOBS, task_id)
+        os.makedirs(rdir, exist_ok=True)
+        # pull the input from the PVC (grand1-initiated over .17)
+        log(f"  pull input _imports/{ds_id}/input{suffix}")
+        ok = rc_pull(f'_imports/{ds_id}/input{suffix}', rdir)
+        inp = os.path.join(rdir, f'input{suffix}')
+        if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
+            push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
+                                  'error': 'input pull from PVC failed'})
+            mark_done(task_id)
+            log(f"  input pull failed for {task_id}")
             return
-        os.remove(jobf)  # job gone and not completed → allow a retry
+        push_status(task_id, {'step': 'queued', 'progress': 10, 'stats': {}})
+        jobid = qsub_job(task_id, ds_id, suffix, tile_size, overlap, model)
+        with open(jobf, 'w') as f:
+            f.write(jobid)
+        log(f"  qsub {task_id} -> {jobid}")
 
-    push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
-    rdir = os.path.join(DEPLOY_JOBS, task_id)
-    os.makedirs(rdir, exist_ok=True)
-    # pull the input from the PVC (grand1-initiated over .17)
-    log(f"  pull input _imports/{ds_id}/input{suffix}")
-    ok = rc_pull(f'_imports/{ds_id}/input{suffix}', rdir)
-    inp = os.path.join(rdir, f'input{suffix}')
-    if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
-        push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
-                              'error': 'input pull from PVC failed'})
-        mark_done(task_id)
-        log(f"  input pull failed for {task_id}")
-        return
-
-    push_status(task_id, {'step': 'queued', 'progress': 10, 'stats': {}})
-    jobid = qsub_job(task_id, ds_id, suffix, tile_size, overlap, model)
-    with open(jobf, 'w') as f:
-        f.write(jobid)
-    log(f"  qsub {task_id} -> {jobid}")
-
-    start = time.time()
-    last_push = 0.0
+    submit_t = time.time()
+    run_start = None       # set when the job first enters 'R' — the HPC is busy,
+    last_push = 0.0        # so time spent queued must NOT count toward a timeout.
+    logged_queue = False
     while True:
         time.sleep(POLL)
         local = read_local_status(task_id)
         step = (local or {}).get('step')
         if step in ('completed', 'failed'):
             break
-        if time.time() - last_push >= PROGRESS_PUSH and local:
-            push_status(task_id, local)
-            last_push = time.time()
-        if not job_alive(jobid):
-            # give the fs a moment, then decide by status.json
+        state = job_state(jobid)
+        now = time.time()
+        if state == 'R' and run_start is None:
+            run_start = now
+            log(f"  {task_id} running (queued {int(now - submit_t)}s)")
+        # progress push: the job's own status.json once running, else "queued".
+        if now - last_push >= PROGRESS_PUSH:
+            if local:
+                push_status(task_id, local)
+            elif state in ('Q', 'H'):
+                push_status(task_id, {'step': 'queued', 'progress': 5, 'stats': {},
+                                      'note': 'waiting in the HPC queue'})
+                if not logged_queue:
+                    log(f"  {task_id} waiting in sg queue ({jobid})")
+                    logged_queue = True
+            last_push = now
+        if state is None:                 # gone from PBS
             time.sleep(5)
             local = read_local_status(task_id)
             if (local or {}).get('step') in ('completed', 'failed'):
+                break
+            if os.path.isfile(os.path.join(DEPLOY_JOBS, task_id, 'result.ply')):
+                step = 'completed'
                 break
             push_status(task_id, {'step': 'failed', 'progress': 0,
                                   'stats': (local or {}).get('stats', {}),
@@ -252,11 +278,13 @@ def process(task_id):
             mark_done(task_id)
             log(f"  {task_id} job ended without completion")
             return
-        if time.time() - start > JOB_TIMEOUT:
+        # Timeout only counts actual RUN time — never queue wait (congestion is
+        # normal on a busy cluster; the job is healthy, just waiting for a GPU).
+        if run_start and now - run_start > JOB_TIMEOUT:
             push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
-                                  'error': 'job timeout'})
+                                  'error': 'run timeout'})
             mark_done(task_id)
-            log(f"  {task_id} timed out")
+            log(f"  {task_id} run timed out")
             return
 
     log(f"  push results for {task_id} (final step={step})")
