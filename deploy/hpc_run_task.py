@@ -86,22 +86,67 @@ def _gpu_stats():
         return None
 
 
+_PLY_NP = {
+    'char': 'i1', 'int8': 'i1', 'uchar': 'u1', 'uint8': 'u1',
+    'short': 'i2', 'int16': 'i2', 'ushort': 'u2', 'uint16': 'u2',
+    'int': 'i4', 'int32': 'i4', 'uint': 'u4', 'uint32': 'u4',
+    'float': 'f4', 'float32': 'f4', 'double': 'f8', 'float64': 'f8',
+}
+
+
 def _read_ply_xyz(path):
-    fields = []
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith('property'):
-                fields.append(line.split()[-1])
-            elif line == 'end_header':
+    """Read XYZ from an ASCII or binary PLY. TLS exports are almost always
+    binary_little_endian, so parse the header for the format and the vertex
+    element's property layout, then read accordingly. Extra per-point properties
+    (intensity, rgb, normals, ...) are parsed for stride but ignored."""
+    with open(path, 'rb') as f:
+        fmt = None
+        n_vertex = 0
+        props = []          # (name, ply_type) for the vertex element, in order
+        cur_elem = None
+        while True:
+            raw = f.readline()
+            if not raw:
+                raise ValueError("PLY ended before end_header")
+            tok = raw.decode('ascii', 'replace').strip().split()
+            if not tok:
+                continue
+            if tok[0] == 'format':
+                fmt = tok[1]
+            elif tok[0] == 'element':
+                cur_elem = tok[1]
+                if cur_elem == 'vertex':
+                    n_vertex = int(tok[2])
+            elif tok[0] == 'property' and cur_elem == 'vertex':
+                props.append((tok[-1], tok[1]))   # ('x','float'), ...
+            elif tok[0] == 'end_header':
                 break
-        col = {name: idx for idx, name in enumerate(fields)}
-        rows = []
-        for line in f:
-            vals = line.strip().split()
-            rows.append([float(vals[col['x']]), float(vals[col['y']]),
-                         float(vals[col['z']])])
-    return np.array(rows, dtype=np.float64)
+        names = [p[0] for p in props]
+        for c in ('x', 'y', 'z'):
+            if c not in names:
+                raise ValueError(f"PLY vertex has no '{c}' (properties: {names})")
+
+        if fmt == 'ascii':
+            col = {n: i for i, n in enumerate(names)}
+            out = np.empty((n_vertex, 3), dtype=np.float64)
+            for i in range(n_vertex):
+                v = f.readline().decode('ascii', 'replace').split()
+                out[i, 0] = float(v[col['x']])
+                out[i, 1] = float(v[col['y']])
+                out[i, 2] = float(v[col['z']])
+            return out
+
+        # binary_little_endian / binary_big_endian
+        endian = '<' if fmt == 'binary_little_endian' else '>'
+        try:
+            dt = np.dtype([(p[0], endian + _PLY_NP[p[1]]) for p in props])
+        except KeyError as e:
+            raise ValueError(f"PLY vertex has an unsupported property type: {e}")
+        buf = f.read(n_vertex * dt.itemsize)
+        rec = np.frombuffer(buf, dtype=dt, count=n_vertex)
+        return np.stack([rec['x'].astype(np.float64),
+                         rec['y'].astype(np.float64),
+                         rec['z'].astype(np.float64)], axis=1)
 
 
 def _save_result_ply(path, xyz, semantic, instance, scores):
