@@ -1282,10 +1282,14 @@ async def predict(
         'updated': time.time(),
     }
 
-    # Save upload
+    # Save upload. For the HPC backend the file goes into the PVC dataset dir so
+    # the grand1 worker can pull it over .17 (no pod->HPC SSH); for the local
+    # backend it goes straight into the task dir to segment from.
     task_dir = os.path.join(RESULTS_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
-    input_path = os.path.join(task_dir, f'input{suffix}')
+    save_dir = os.path.join(IMPORT_DIR, task_id) if INFERENCE_BACKEND == 'hpc' else task_dir
+    os.makedirs(save_dir, exist_ok=True)
+    input_path = os.path.join(save_dir, f'input{suffix}')
 
     # Rewind first: SpooledTemporaryFile sits at EOF for large uploads,
     # and chunked copy avoids holding multi-GB files in RAM.
@@ -1299,18 +1303,48 @@ async def predict(
     if os.path.getsize(input_path) == 0:
         del tasks[task_id]
         shutil.rmtree(task_dir, ignore_errors=True)
+        shutil.rmtree(save_dir, ignore_errors=True)
         raise HTTPException(400, "Uploaded file is empty")
 
-    _update_task_progress(task_id, 'uploading', progress=5)
+    if INFERENCE_BACKEND == 'hpc':
+        # Hand off to the grand1 worker via the PVC — same path as /segment, so
+        # the retired pod->HPC SSH is never touched. (The old _get_inference_target
+        # SSH route is why uploads froze at 100%: the body finished but the
+        # background job could never reach the HPC.)
+        from deploy.inference_engine import DEFAULT_MODEL
+        try:
+            with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
+                json.dump({'filename': file.filename, 'format': suffix.lstrip('.'),
+                           'size': os.path.getsize(input_path),
+                           'created': time.time()}, f)
+        except OSError:
+            pass
+        request = {'task_id': task_id, 'dataset_id': task_id, 'suffix': suffix,
+                   'tile_size': tile_size, 'overlap': overlap,
+                   'model': DEFAULT_MODEL, 'filename': file.filename,
+                   'created': time.time()}
+        with open(os.path.join(task_dir, 'request.json'), 'w') as f:
+            json.dump(request, f)
+        with open(os.path.join(task_dir, 'status.json'), 'w') as f:
+            json.dump({'step': 'queued', 'progress': 5, 'stats': {}}, f)
+        tasks[task_id] = {**dict(tasks[task_id]), 'status': 'processing',
+                          'step': 'queued', 'step_label': 'Queued on HPC',
+                          'progress': 5, 'dataset_id': task_id,
+                          'model': DEFAULT_MODEL, 'updated': time.time()}
+        threading.Thread(target=_watch_pvc_status, args=(task_id,),
+                         daemon=True).start()
+        return JSONResponse({'task_id': task_id, 'status': 'processing',
+                             'backend': INFERENCE_BACKEND,
+                             'status_url': f'/task/{task_id}/status'})
 
-    # Launch background process for inference (separate process = no GIL blocking API)
+    # Local backend: segment from the pod copy in-process.
+    _update_task_progress(task_id, 'uploading', progress=5)
     proc = multiprocessing.Process(
-        target=_get_inference_target(),
+        target=_run_inference_background,
         args=(tasks, task_id, input_path, suffix, tile_size, overlap),
         daemon=True,
     )
     proc.start()
-
     return JSONResponse({
         'task_id': task_id,
         'status': 'processing',
