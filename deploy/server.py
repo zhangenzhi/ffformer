@@ -818,12 +818,20 @@ async def import_dataset(file: UploadFile = File(...)):
         # pod's OWN PVC — the pod->HPC management SSH is retired and would hang the
         # request at 100% waiting on a dead connection. grand1 (the HPC login node)
         # pulls the input from here over the .17 channel to run inference.
-        with open(input_path, 'wb') as f:
-            while True:
-                chunk = await file.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
+        try:
+            with open(input_path, 'wb') as f:
+                while True:
+                    chunk = await file.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        except Exception as ex:
+            # Client disconnect mid-upload, or ENOSPC (PVC full): remove the
+            # half-written input so it doesn't orphan in the PVC (and free the
+            # space a disk-full upload partially used).
+            shutil.rmtree(ds_dir, ignore_errors=True)
+            datasets.pop(ds_id, None)
+            raise HTTPException(500, f"Upload failed or was interrupted: {ex}")
         total = os.path.getsize(input_path)
         if total == 0:
             shutil.rmtree(ds_dir, ignore_errors=True)
@@ -841,12 +849,20 @@ async def import_dataset(file: UploadFile = File(...)):
         _dset(size=total, input_path=input_path, hpc_stage='ready',
               hpc_ready=True, hpc_progress=100, hpc_suffix=suffix)
     else:
-        with open(input_path, 'wb') as f:
-            while True:
-                chunk = await file.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
+        try:
+            with open(input_path, 'wb') as f:
+                while True:
+                    chunk = await file.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        except Exception as ex:
+            # Client disconnect mid-upload, or ENOSPC (PVC full): remove the
+            # half-written input so it doesn't orphan in the PVC (and free the
+            # space a disk-full upload partially used).
+            shutil.rmtree(ds_dir, ignore_errors=True)
+            datasets.pop(ds_id, None)
+            raise HTTPException(500, f"Upload failed or was interrupted: {ex}")
         total = os.path.getsize(input_path)
         if total == 0:
             shutil.rmtree(ds_dir, ignore_errors=True)
@@ -1294,12 +1310,21 @@ async def predict(
     # Rewind first: SpooledTemporaryFile sits at EOF for large uploads,
     # and chunked copy avoids holding multi-GB files in RAM.
     await file.seek(0)
-    with open(input_path, 'wb') as f:
-        while True:
-            chunk = await file.read(8 * 1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
+    try:
+        with open(input_path, 'wb') as f:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as ex:
+        # Client disconnect mid-upload, or ENOSPC (PVC full): never leave a
+        # half-written input orphaned in the PVC — remove it (this also frees the
+        # space a disk-full upload had partially consumed), and drop the task.
+        tasks.pop(task_id, None)
+        shutil.rmtree(task_dir, ignore_errors=True)
+        shutil.rmtree(save_dir, ignore_errors=True)
+        raise HTTPException(500, f"Upload failed or was interrupted: {ex}")
     if os.path.getsize(input_path) == 0:
         del tasks[task_id]
         shutil.rmtree(task_dir, ignore_errors=True)
