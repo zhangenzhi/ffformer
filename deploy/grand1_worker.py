@@ -111,6 +111,13 @@ def push_status(task_id, obj):
         pass
 
 
+def rc_delete(remote):
+    """Delete a file (or dir) on the .17 webdav. Used to free the PVC relay copy
+    of an input once it is safely on the HPC — the PVC is a transfer buffer, not
+    permanent storage, so inputs must not accumulate there."""
+    return _rc(['delete', _R(remote)]).returncode == 0
+
+
 def is_done_local(task_id):
     return os.path.isfile(os.path.join(STATE_DIR, f'{task_id}.done'))
 
@@ -219,19 +226,28 @@ def process(task_id):
             os.remove(jobf)  # job gone and not completed → allow a retry
 
     if jobid is None:
-        push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
         rdir = os.path.join(DEPLOY_JOBS, task_id)
         os.makedirs(rdir, exist_ok=True)
-        # pull the input from the PVC (grand1-initiated over .17)
-        log(f"  pull input _imports/{ds_id}/input{suffix}")
-        ok = rc_pull(f'_imports/{ds_id}/input{suffix}', rdir)
         inp = os.path.join(rdir, f'input{suffix}')
-        if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
-            push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
-                                  'error': 'input pull from PVC failed'})
-            mark_done(task_id)
-            log(f"  input pull failed for {task_id}")
-            return
+        if os.path.isfile(inp) and os.path.getsize(inp) > 0:
+            # Already staged on the HPC (e.g. a retry) — reuse it, no re-pull.
+            log(f"  input already on HPC, reuse ({task_id})")
+        else:
+            push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
+            # pull the input from the PVC (grand1-initiated over .17)
+            log(f"  pull input _imports/{ds_id}/input{suffix}")
+            ok = rc_pull(f'_imports/{ds_id}/input{suffix}', rdir)
+            if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
+                push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
+                                      'error': 'input pull from PVC failed'})
+                mark_done(task_id)
+                log(f"  input pull failed for {task_id}")
+                return
+            # The input now lives on the HPC. The PVC is only a transfer relay, so
+            # delete its copy immediately (keep meta.json) — otherwise multi-GB
+            # inputs accumulate there forever and fill the 100Gi PVC.
+            if rc_delete(f'_imports/{ds_id}/input{suffix}'):
+                log(f"  freed PVC relay copy _imports/{ds_id}/input{suffix}")
         push_status(task_id, {'step': 'queued', 'progress': 10, 'stats': {}})
         jobid = qsub_job(task_id, ds_id, suffix, tile_size, overlap, model)
         with open(jobf, 'w') as f:
