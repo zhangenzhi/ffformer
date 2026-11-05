@@ -1135,6 +1135,30 @@ def _watch_pvc_status(task_id, timeout=20 * 3600):
             return
 
 
+def _fetch_ply_from_hpc(task_id, timeout=240):
+    """The heavy result.ply is kept on the HPC (not the PVC); only the lightweight
+    viewer/stats/trees are pushed. For a download, ask the grand1 worker to fetch
+    result.ply to the PVC (drop results/<id>/fetch.request) and wait for it. The
+    worker copies it atomically (…part then rename), so we only ever see a complete
+    file. Returns True once result.ply is local."""
+    ply = os.path.join(RESULTS_DIR, task_id, 'result.ply')
+    if os.path.isfile(ply) or INFERENCE_BACKEND != 'hpc':
+        return os.path.isfile(ply)
+    task_dir = os.path.join(RESULTS_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    try:
+        with open(os.path.join(task_dir, 'fetch.request'), 'w') as f:
+            json.dump({'task_id': task_id, 'requested': time.time()}, f)
+    except OSError:
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(2)
+        if os.path.isfile(ply):
+            return True
+    return os.path.isfile(ply)
+
+
 def _ensure_result_local(tid, want_ply=False):
     """A result restored from the HPC has no local files (pod /tmp was wiped). On
     first access, download+extract its bundle so the viewer/result endpoints work."""
@@ -1534,9 +1558,13 @@ def download_ply(task_id: str):
         raise HTTPException(400, "Invalid task id")
     if task_id not in tasks:
         _sync_results_from_hpc()      # repopulate restored tasks after a restart
-    _ensure_result_local(task_id, want_ply=True)
     task = tasks.get(task_id)
     ply = (task.get('result_ply') if task else None) or os.path.join(RESULTS_DIR, task_id, 'result.ply')
+    # result.ply lives on the HPC; fetch it to the PVC on demand (waits for the
+    # grand1 worker). The viewer never needs this — only an explicit download.
+    if not os.path.isfile(ply) and not _fetch_ply_from_hpc(task_id):
+        raise HTTPException(503, "結果ファイルをHPCから取得中です。しばらくして再試行してください "
+                                 "(result is being fetched from the HPC; retry shortly)")
     if not os.path.isfile(ply):
         raise HTTPException(404, "Result PLY not found")
     return FileResponse(ply, media_type='application/octet-stream',
@@ -1572,13 +1600,20 @@ def result_trees(task_id: str):
     """Per-tree metrics computed from the result PLY (cached as trees.json)."""
     if '/' in task_id or '..' in task_id:
         raise HTTPException(400, "Invalid task id")
-    _ensure_result_local(task_id, want_ply=True)
     task_dir = os.path.join(RESULTS_DIR, task_id)
+    cache = os.path.join(task_dir, 'trees.json')
+    # The worker pushes trees.json (computed on the HPC), so the metrics are served
+    # without the heavy result.ply. Only if the cache is missing do we need the PLY.
+    if os.path.isfile(cache):
+        with open(cache) as f:
+            return JSONResponse(json.load(f))
     ply_path = os.path.join(task_dir, 'result.ply')
+    if not os.path.isfile(ply_path) and not _fetch_ply_from_hpc(task_id):
+        raise HTTPException(503, "結果をHPCから取得中です。しばらくして再試行してください "
+                                 "(fetching result from the HPC; retry shortly)")
     if not os.path.isfile(ply_path):
         raise HTTPException(404, "No result for this task")
     from deploy.tree_analysis import compute_tree_metrics
-    cache = os.path.join(task_dir, 'trees.json')
     try:
         return JSONResponse(compute_tree_metrics(ply_path, cache_path=cache))
     except Exception as e:
@@ -1592,14 +1627,19 @@ def result_tree_points(task_id: str, tree_id: int):
     built once per result, then each tree is served by byte-range."""
     if '/' in task_id or '..' in task_id:
         raise HTTPException(400, "Invalid task id")
-    _ensure_result_local(task_id, want_ply=True)
     task_dir = os.path.join(RESULTS_DIR, task_id)
     ply_path = os.path.join(task_dir, 'result.ply')
-    if not os.path.isfile(ply_path):
-        raise HTTPException(404, "No result for this task")
-    from deploy.tree_analysis import build_tree_point_store
     bin_path = os.path.join(task_dir, 'trees_points.bin')
     idx_path = os.path.join(task_dir, 'trees_points_index.json')
+    # The per-tree store is built once from the PLY and cached. If it isn't built
+    # yet, fetch result.ply from the HPC on demand (it isn't kept on the PVC).
+    if not (os.path.isfile(bin_path) and os.path.isfile(idx_path)):
+        if not os.path.isfile(ply_path) and not _fetch_ply_from_hpc(task_id):
+            raise HTTPException(503, "結果をHPCから取得中です。しばらくして再試行してください "
+                                     "(fetching result from the HPC; retry shortly)")
+        if not os.path.isfile(ply_path):
+            raise HTTPException(404, "No result for this task")
+    from deploy.tree_analysis import build_tree_point_store
     try:
         index = build_tree_point_store(ply_path, bin_path, idx_path)
     except Exception as e:

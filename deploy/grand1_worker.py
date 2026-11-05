@@ -99,6 +99,28 @@ def rc_push_dir(localdir, remotedir):
                 '--multi-thread-streams', '8']).returncode == 0
 
 
+def rc_copyto(localfile, remotepath):
+    """Push a local file to an exact remote path (not into a dir)."""
+    return _rc(['copyto', localfile, _R(remotepath),
+                '--multi-thread-streams', '8']).returncode == 0
+
+
+def rc_moveto(remote_src, remote_dst):
+    """Server-side rename on the webdav remote (atomic on the PVC filesystem)."""
+    return _rc(['moveto', _R(remote_src), _R(remote_dst)]).returncode == 0
+
+
+def rc_size(remote):
+    """Bytes of a remote file, or -1 if unknown."""
+    r = _rc(['size', _R(remote), '--json'])
+    if r.returncode != 0:
+        return -1
+    try:
+        return int(json.loads(r.stdout).get('bytes', -1))
+    except (ValueError, TypeError):
+        return -1
+
+
 def push_status(task_id, obj):
     """Write status.json into PVC results/<task_id>/ so the pod/UI can see it."""
     tmp = os.path.join(STATE_DIR, f'{task_id}.status.json')
@@ -168,7 +190,9 @@ def read_local_status(task_id):
         return None
 
 
-RESULT_FILES = ['result.ply', 'stats.json', 'status.json', 'inference.log']
+# Lightweight artifacts the dashboard needs — pushed to the PVC. The heavy
+# result.ply (multi-GB, download-only) stays on the HPC and is fetched on demand.
+RESULT_FILES = ['stats.json', 'status.json', 'inference.log', 'trees.json']
 
 
 def push_results(task_id):
@@ -183,6 +207,42 @@ def push_results(task_id):
     vdir = os.path.join(rdir, 'viewer')
     if os.path.isdir(vdir):
         rc_push_dir(vdir, f'{task_id}/viewer')
+
+
+def find_fetch_requests():
+    """task_ids whose result.ply the pod asked to be fetched to the PVC."""
+    out = []
+    r = _rc(['lsf', ':webdav:', '-R', '--max-depth', '2'])
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            if line.endswith('/fetch.request'):
+                out.append(line.split('/', 1)[0])
+    return out
+
+
+def serve_fetch(task_id):
+    """Fetch the heavy result.ply from the HPC to the PVC on demand (download).
+    Atomic: push to result.ply.part, verify size, then server-side rename to
+    result.ply — an interrupted fetch leaves only a .part (cleared next time) and
+    never a truncated result.ply. The authoritative copy stays on the HPC."""
+    ply = os.path.join(DEPLOY_JOBS, task_id, 'result.ply')
+    if not os.path.isfile(ply):
+        log(f"  fetch: no result.ply on HPC for {task_id}")
+        rc_delete(f'{task_id}/fetch.request')
+        return
+    if rc_size(f'{task_id}/result.ply') == os.path.getsize(ply):
+        rc_delete(f'{task_id}/fetch.request')  # already there, complete
+        return
+    log(f"  fetch: pushing result.ply for {task_id} ({os.path.getsize(ply)//(1<<20)}MB)")
+    rc_delete(f'{task_id}/result.ply.part')     # clear any stale partial
+    if (rc_copyto(ply, f'{task_id}/result.ply.part')
+            and rc_size(f'{task_id}/result.ply.part') == os.path.getsize(ply)
+            and rc_moveto(f'{task_id}/result.ply.part', f'{task_id}/result.ply')):
+        log(f"  fetch: result.ply ready for {task_id}")
+    else:
+        log(f"  fetch: result.ply push failed/interrupted for {task_id} (will retry)")
+        rc_delete(f'{task_id}/result.ply.part')
+    rc_delete(f'{task_id}/fetch.request')
 
 
 def process(task_id):
@@ -349,6 +409,11 @@ def main():
                     process(tid)
                 except Exception as ex:
                     log(f"  ERROR processing {tid}: {ex}")
+            for tid in find_fetch_requests():
+                try:
+                    serve_fetch(tid)
+                except Exception as ex:
+                    log(f"  ERROR fetching {tid}: {ex}")
         except Exception as ex:
             log(f"loop error: {ex}")
         for _ in range(int(POLL)):
