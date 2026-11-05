@@ -294,20 +294,19 @@ def process(task_id):
             log(f"  input already on HPC, reuse ({task_id})")
         else:
             push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
-            # pull the input from the PVC (grand1-initiated over .17)
-            log(f"  pull input _imports/{ds_id}/input{suffix}")
-            ok = rc_pull(f'_imports/{ds_id}/input{suffix}', rdir)
+            # pull the input from the ephemeral staging dir (grand1-initiated .17)
+            log(f"  pull input _staging/{ds_id}/input{suffix}")
+            ok = rc_pull(f'_staging/{ds_id}/input{suffix}', rdir)
             if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
                 push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
-                                      'error': 'input pull from PVC failed'})
+                                      'error': 'input pull from staging failed'})
                 mark_done(task_id)
                 log(f"  input pull failed for {task_id}")
                 return
-            # The input now lives on the HPC. The PVC is only a transfer relay, so
-            # delete its copy immediately (keep meta.json) — otherwise multi-GB
-            # inputs accumulate there forever and fill the 100Gi PVC.
-            if rc_delete(f'_imports/{ds_id}/input{suffix}'):
-                log(f"  freed PVC relay copy _imports/{ds_id}/input{suffix}")
+            # The input now lives on the HPC. Staging is only a transfer relay, so
+            # delete the cloud copy immediately — inputs must not linger there.
+            if rc_delete(f'_staging/{ds_id}/input{suffix}'):
+                log(f"  freed staging copy _staging/{ds_id}/input{suffix}")
         push_status(task_id, {'step': 'queued', 'progress': 10, 'stats': {}})
         jobid = qsub_job(task_id, ds_id, suffix, tile_size, overlap, model)
         with open(jobf, 'w') as f:

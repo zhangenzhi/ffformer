@@ -283,6 +283,16 @@ tasks = _manager.dict()
 datasets = _manager.dict()
 IMPORT_DIR = os.environ.get('IMPORT_DIR', os.path.join(RESULTS_DIR, '_imports'))
 os.makedirs(IMPORT_DIR, exist_ok=True)
+# Uploaded inputs are transient transfer data (grand1 pulls them to the HPC, then
+# they're deleted). They live on an EPHEMERAL emptyDir, never the persistent PVC,
+# so multi-GB uploads can't fill it. Only the tiny meta.json stays in IMPORT_DIR
+# (PVC) so the Media Library survives a restart. The webdav sidecar serves this
+# emptyDir at /_staging so grand1 can pull from it over .17.
+STAGING_DIR = os.environ.get('STAGING_DIR', '/workspace/staging')
+try:
+    os.makedirs(STAGING_DIR, exist_ok=True)
+except OSError:
+    pass
 
 
 PROGRESS_STEPS = [
@@ -798,9 +808,16 @@ async def import_dataset(file: UploadFile = File(...)):
         raise HTTPException(400, f"Unsupported format: {suffix}. Use .las, .laz, or .ply")
 
     ds_id = str(uuid.uuid4())[:8]
-    ds_dir = os.path.join(IMPORT_DIR, ds_id)
+    ds_dir = os.path.join(IMPORT_DIR, ds_id)      # PVC: keeps meta.json (persists)
     os.makedirs(ds_dir, exist_ok=True)
-    input_path = os.path.join(ds_dir, f'input{suffix}')
+    # HPC input → ephemeral staging (emptyDir, never the persistent PVC); local
+    # backend keeps the input in the dataset dir to segment from.
+    if INFERENCE_BACKEND == 'hpc':
+        stage_dir = os.path.join(STAGING_DIR, ds_id)
+        os.makedirs(stage_dir, exist_ok=True)
+        input_path = os.path.join(stage_dir, f'input{suffix}')
+    else:
+        input_path = os.path.join(ds_dir, f'input{suffix}')
     datasets[ds_id] = {
         'id': ds_id, 'filename': file.filename, 'format': suffix.lstrip('.'),
         'size': 0, 'hpc_stage': 'uploading', 'hpc_progress': 0,
@@ -830,11 +847,13 @@ async def import_dataset(file: UploadFile = File(...)):
             # half-written input so it doesn't orphan in the PVC (and free the
             # space a disk-full upload partially used).
             shutil.rmtree(ds_dir, ignore_errors=True)
+            shutil.rmtree(os.path.join(STAGING_DIR, ds_id), ignore_errors=True)
             datasets.pop(ds_id, None)
             raise HTTPException(500, f"Upload failed or was interrupted: {ex}")
         total = os.path.getsize(input_path)
         if total == 0:
             shutil.rmtree(ds_dir, ignore_errors=True)
+            shutil.rmtree(os.path.join(STAGING_DIR, ds_id), ignore_errors=True)
             del datasets[ds_id]
             raise HTTPException(400, "Uploaded file is empty")
         # meta.json next to the input so the dataset survives a restart and grand1
@@ -861,11 +880,13 @@ async def import_dataset(file: UploadFile = File(...)):
             # half-written input so it doesn't orphan in the PVC (and free the
             # space a disk-full upload partially used).
             shutil.rmtree(ds_dir, ignore_errors=True)
+            shutil.rmtree(os.path.join(STAGING_DIR, ds_id), ignore_errors=True)
             datasets.pop(ds_id, None)
             raise HTTPException(500, f"Upload failed or was interrupted: {ex}")
         total = os.path.getsize(input_path)
         if total == 0:
             shutil.rmtree(ds_dir, ignore_errors=True)
+            shutil.rmtree(os.path.join(STAGING_DIR, ds_id), ignore_errors=True)
             del datasets[ds_id]
             raise HTTPException(400, "Uploaded file is empty")
         _dset(size=total, input_path=input_path, hpc_stage='ready',
@@ -1322,12 +1343,12 @@ async def predict(
         'updated': time.time(),
     }
 
-    # Save upload. For the HPC backend the file goes into the PVC dataset dir so
-    # the grand1 worker can pull it over .17 (no pod->HPC SSH); for the local
-    # backend it goes straight into the task dir to segment from.
+    # Save upload. For the HPC backend the input goes to the EPHEMERAL staging dir
+    # (emptyDir — never the persistent PVC) where the grand1 worker pulls it over
+    # .17; for the local backend it goes to the task dir to segment from.
     task_dir = os.path.join(RESULTS_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
-    save_dir = os.path.join(IMPORT_DIR, task_id) if INFERENCE_BACKEND == 'hpc' else task_dir
+    save_dir = os.path.join(STAGING_DIR, task_id) if INFERENCE_BACKEND == 'hpc' else task_dir
     os.makedirs(save_dir, exist_ok=True)
     input_path = os.path.join(save_dir, f'input{suffix}')
 
@@ -1361,8 +1382,12 @@ async def predict(
         # SSH route is why uploads froze at 100%: the body finished but the
         # background job could never reach the HPC.)
         from deploy.inference_engine import DEFAULT_MODEL
+        # meta.json goes to the PERSISTENT PVC (IMPORT_DIR) so the Media Library
+        # survives a restart; only the bulky input stays on the ephemeral staging.
+        meta_dir = os.path.join(IMPORT_DIR, task_id)
         try:
-            with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
+            os.makedirs(meta_dir, exist_ok=True)
+            with open(os.path.join(meta_dir, 'meta.json'), 'w') as f:
                 json.dump({'filename': file.filename, 'format': suffix.lstrip('.'),
                            'size': os.path.getsize(input_path),
                            'created': time.time()}, f)
