@@ -294,19 +294,24 @@ def process(task_id):
             log(f"  input already on HPC, reuse ({task_id})")
         else:
             push_status(task_id, {'step': 'staging', 'progress': 8, 'stats': {}})
-            # pull the input from the ephemeral staging dir (grand1-initiated .17)
-            log(f"  pull input _staging/{ds_id}/input{suffix}")
+            # pull the input from the ephemeral staging dir (grand1-initiated .17);
+            # fall back to the legacy PVC _imports/ path for uploads made before the
+            # emptyDir migration.
+            log(f"  pull input for {ds_id} (_staging, fallback _imports)")
             ok = rc_pull(f'_staging/{ds_id}/input{suffix}', rdir)
             if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
+                ok = rc_pull(f'_imports/{ds_id}/input{suffix}', rdir)
+            if not ok or not os.path.isfile(inp) or os.path.getsize(inp) == 0:
                 push_status(task_id, {'step': 'failed', 'progress': 0, 'stats': {},
-                                      'error': 'input pull from staging failed'})
+                                      'error': 'input pull failed (staging/_imports)'})
                 mark_done(task_id)
                 log(f"  input pull failed for {task_id}")
                 return
-            # The input now lives on the HPC. Staging is only a transfer relay, so
-            # delete the cloud copy immediately — inputs must not linger there.
-            if rc_delete(f'_staging/{ds_id}/input{suffix}'):
-                log(f"  freed staging copy _staging/{ds_id}/input{suffix}")
+            # The input now lives on the HPC — free both possible cloud copies
+            # (ephemeral staging + any legacy PVC copy) so nothing lingers.
+            rc_delete(f'_staging/{ds_id}/input{suffix}')
+            rc_delete(f'_imports/{ds_id}/input{suffix}')
+            log(f"  staged to HPC + freed cloud input copies for {ds_id}")
         push_status(task_id, {'step': 'queued', 'progress': 10, 'stats': {}})
         jobid = qsub_job(task_id, ds_id, suffix, tile_size, overlap, model)
         with open(jobf, 'w') as f:
